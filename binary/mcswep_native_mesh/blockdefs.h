@@ -19,7 +19,7 @@ namespace mcmesh::blockdefs {
 	struct TemplateDef { uint8_t mask = 0; std::vector<Box>boxes; std::vector<Quad>quads; };
 	struct OrientDef { uint8_t orient = 0, pass = 0, flags = 0, connectCaps = 0; EmitterKind emitter = EmitterKind::FullCube; std::vector<FaceTexture>faces; std::vector<Box>boxes; std::vector<Quad>quads; std::vector<TemplateDef>templates; };
 	struct BlockDef { uint16_t id = 0, flags = 0; uint8_t defaultOrient = 0; LiquidKind liquid = LiquidKind::None; ConnectionKind connection = ConnectionKind::None; std::vector<OrientDef>orients; };
-	struct StateDef { uint16_t blockId = 0; uint8_t orient = 0, flags = 0; std::array<uint16_t, 5>stairPlans{}; };
+	struct StateDef { uint16_t blockId = 0; uint8_t orient = 0, flags = 0, liquidKind = 0, liquidAmount = 0; std::array<uint16_t, 5>stairPlans{}; };
 	struct VisualGeometry { uint32_t firstQuad = 0; uint16_t quadCount = 0; };
 	struct VisualSurfaceSet { uint32_t firstEntry = 0; uint16_t entryCount = 0; };
 	struct VisualModel { uint16_t geometryId = 0, surfaceId = 0; std::array<uint8_t, 6> uvRotationAdd{}; };

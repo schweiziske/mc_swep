@@ -31,7 +31,7 @@ local CONVAR_ENABLED = CreateClientConVar( "mc_native_mesh", "1", true, false,
 local CONVAR_THINK_MS = CreateClientConVar( "mc_native_think_ms", "3", true, false,
 	"Per-frame budget (ms) for native mesh finalization" )
 
-local ADAPTER_ABI = 3   -- M5.6 MCBD v4 visual transform format v2
+local ADAPTER_ABI = 4   -- M5.7 state-native liquid metrics
 
 local state = {
 	active = false,
@@ -363,6 +363,7 @@ local function stateMapPayload()
 	local parts = {}
 	for stateId = 0, count - 1 do
 		local blockId, orient, stairPlans = 0, 0, {0,0,0,0,0}
+		local stateLiquidKind, stateLiquidAmount = 0, 0
 		if stateId ~= 0 then
 			local exact, projectionError
 			blockId, orient, exact, projectionError = MC.LegacyFromState( stateId )
@@ -382,11 +383,21 @@ local function stateMapPayload()
 					stairPlans[index] = checkedInt( planId or 0, 1, 65535, "stair plan" )
 				end
 			end
+			if MC.LiquidStateMetrics then
+				local kind, ownHeight, _, _, waterlogged = MC.LiquidStateMetrics( stateId )
+				if kind and not waterlogged then
+					stateLiquidKind = checkedInt( LIQUID[kind] or 0, 1, 2, "state liquid kind" )
+					local scaled = checkedNumber( ownHeight, 0, 1, "state liquid height" ) * 9
+					stateLiquidAmount = checkedInt( math.floor( scaled + 0.5 ), 1, 8, "state liquid amount" )
+					if math.abs( scaled - stateLiquidAmount ) > 0.000001 then error( "state liquid height is not quantized", 0 ) end
+				end
+			end
 			parts[#parts + 1] = u32le( stateId ) .. u16le( checkedInt( blockId, 1, 65535, "state block id" ) )
-				.. u8( checkedInt( orient or 0, 0, 255, "state orient" ) ) .. u8( stateFlags ) .. u8( 0 )
+				.. u8( checkedInt( orient or 0, 0, 255, "state orient" ) ) .. u8( stateFlags )
+				.. u8( stateLiquidKind ) .. u8( stateLiquidAmount ) .. u8( 0 )
 				.. u16le(stairPlans[1])..u16le(stairPlans[2])..u16le(stairPlans[3])..u16le(stairPlans[4])..u16le(stairPlans[5])
 		else
-			parts[#parts + 1] = u32le( 0 ) .. u16le( 0 ) .. u8( 0 ) .. u8( 0 ) .. u8( 0 ) .. string.rep( "\0", 10 )
+			parts[#parts + 1] = u32le( 0 ) .. u16le( 0 ) .. string.rep( "\0", 15 )
 		end
 	end
 	return table.concat( parts ), count
@@ -839,7 +850,7 @@ local function tryStart()
 	local blob, census, defCount, opaqueCount, translucentCount
 	local metadata = MC.BlockStateRegistryMetadata or {}
 	local catalog = MC.StateVisualCatalog or {}
-	local cacheKey = "mcbd4-visual2:" .. tostring( metadata.schemaHash or "" ) .. ":" .. tostring( catalog.visualPlanSha256 or "" )
+	local cacheKey = "mcbd4-state-liquid1-visual2:" .. tostring( metadata.schemaHash or "" ) .. ":" .. tostring( catalog.visualPlanSha256 or "" )
 		.. ":" .. tostring( MC.BlockStateCount or 0 )
 	if state.defCache and state.defCache.key == cacheKey then
 		blob, census, defCount, opaqueCount, translucentCount = state.defCache.blob, state.defCache.census,

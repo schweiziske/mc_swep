@@ -2,7 +2,7 @@
 
 MCSWEP 客户端原生建面后端。模块使用 C++ 维护方块世界镜像，在工作线程中生成区块顶点，并在 Garry's Mod 主线程中创建和持有 Source `IMesh`。Lua 适配器负责把 MCSWEP 的 state-native 世界快照和静态视觉定义传入模块，并将原有区块绘制入口转发给 native backend。
 
-当前接口版本：**ABI 3**。
+当前接口版本：**ABI 4**。
 
 > 本仓库只包含 native mesh 后端、配套 Lua 适配器、接口文档和验收脚本。MCSWEP 主项目位于独立仓库。
 
@@ -163,7 +163,7 @@ adapter/lua/autorun/client/mcswep_native_bridge.lua
 garrysmod/addons/mcswep-native/lua/autorun/client/mcswep_native_bridge.lua
 ```
 
-适配器与DLL必须使用相同ABI。当前两者均为ABI 3；旧ABI 2适配器和DLL会拒绝握手，而不会尝试解析不兼容的visual transform数据。
+适配器与DLL必须使用相同ABI。当前两者均为ABI 4；旧ABI适配器和DLL会拒绝握手，而不会尝试解析不兼容的state/visual数据。
 
 运行时创建的chunk材质名称必须以`!`前缀传给native握手。适配器已经处理该约定；手动调用接口时不可传裸材质名。
 
@@ -214,7 +214,7 @@ native启用后是完整的平行渲染后端，不进行方块级、pass级或c
 
 当前主要边界：
 
-- module ABI：3；
+- module ABI：4；
 - MCBD：v4；
 - visual extension：v2；
 - chunk snapshot：32768字节stateId数组；
@@ -225,6 +225,7 @@ visual extension v2支持：
 - model uniform UV rotation；
 - model per-face UV rotation；
 - state-major tint code；
+- state liquid kind/amount，流动液体高度按`amount/9`采样；
 - generated plan/group/model/geometry/surface catalog。
 
 协议细节、函数签名、生命周期和诊断字段以[INTERFACE.md](INTERFACE.md)为准。历史阶段记录保留在各`M*_PLAN.md`中，不应覆盖当前接口契约。
