@@ -31,7 +31,7 @@ local CONVAR_ENABLED = CreateClientConVar( "mc_native_mesh", "1", true, false,
 local CONVAR_THINK_MS = CreateClientConVar( "mc_native_think_ms", "3", true, false,
 	"Per-frame budget (ms) for native mesh finalization" )
 
-local ADAPTER_ABI = 2   -- M5.5 stateId snapshot + MCBD v4
+local ADAPTER_ABI = 3   -- M5.6 MCBD v4 visual transform format v2
 
 local state = {
 	active = false,
@@ -407,18 +407,45 @@ local function visualCatalogPayload( totalStateCount )
 	table.sort(tintIndexes);if #tintIndexes>31 then error("too many visual tint indexes",0) end
 	data[#data+1]=u8(#tintIndexes);for _,ti in ipairs(tintIndexes)do data[#data+1]=u8(ti) end
 	for stateId=0,cs-1 do local blockId=MC.BlockTypeForState and MC.BlockTypeForState(stateId) or 0;for _,ti in ipairs(tintIndexes)do local code=MC.BlockStateTintCode and MC.BlockStateTintCode(stateId,blockId,ti) or 0;data[#data+1]=u8(checkedInt(code,0,255,"state tint code")) end end
-	-- Runtime model transforms are typed into the native stream. Pistons register
-	-- the same 180-degree UV correction for closed/extended bases and heads.
-	local transformed, seen = {}, {}
+	-- Runtime model transforms are typed into the native stream. Format v2
+	-- supports both uniform rotation and face-specific rotation in catalog face
+	-- order (top, bottom, east, west, north, south).
+	local transforms = {}
+	local function addTransform( modelId, kind, rotations, label )
+		modelId = checkedInt( modelId, 1, mc, label .. " model id" )
+		local encoded = u8( kind ) .. u8( 0 )
+		if kind == 0 then
+			encoded = encoded .. u8( checkedInt( rotations[1], 0, 3, label .. " rotation" ) ) .. u8( 0 )
+		elseif kind == 1 then
+			for face = 1, 6 do encoded = encoded .. u8( checkedInt( rotations[face], 0, 3, label .. " face rotation" ) ) end
+		else error( label .. " transform kind invalid", 0 ) end
+		local previous = transforms[modelId]
+		if previous and previous ~= encoded then error( label .. " model transform conflict", 0 ) end
+		transforms[modelId] = encoded
+	end
 	for _,name in ipairs({"minecraft:piston","minecraft:sticky_piston","minecraft:piston_head"}) do
 		local schema=MC.BlockStateSchemaByName and MC.BlockStateSchemaByName[name]
 		if schema and MC.StateVisualPlanRangeFast and MC.StateVisualPlanModelAtFast then for stateId=schema.firstStateId,schema.lastStateId do
 			local planId,groupOffset,groupCount=MC.StateVisualPlanRangeFast(stateId)
-			if groupCount==1 then local modelId=MC.StateVisualPlanModelAtFast(planId,groupOffset,0,0,0,0);if modelId and not seen[modelId]then seen[modelId]=true;transformed[#transformed+1]=modelId end end
+			if groupCount==1 then local modelId=MC.StateVisualPlanModelAtFast(planId,groupOffset,0,0,0,0);if modelId then addTransform(modelId,0,{2},"piston") end end
 		end end
 	end
+	local railSchema=MC.BlockStateSchemaByName and MC.BlockStateSchemaByName["minecraft:rail"]
+	local railCorners={south_east=true,south_west=true,north_west=true,north_east=true}
+	if railSchema and MC.GetStateProperty and MC.StateVisualPlanRangeFast and MC.StateVisualPlanModelAtFast then
+		for stateId=railSchema.firstStateId,railSchema.lastStateId do
+			if railCorners[MC.GetStateProperty(stateId,"shape")] then
+				local planId,groupOffset,groupCount=MC.StateVisualPlanRangeFast(stateId)
+				if groupCount~=1 then error("rail corner transform requires one model group",0) end
+				local modelId=MC.StateVisualPlanModelAtFast(planId,groupOffset,0,0,0,0)
+				if not modelId then error("rail corner transform model missing",0) end
+				addTransform(modelId,1,{3,1,3,3,3,3},"rail corner")
+			end
+		end
+	end
+	local transformed={};for modelId in pairs(transforms)do transformed[#transformed+1]=modelId end
 	table.sort(transformed);data[#data+1]=u16le(#transformed)
-	for _,modelId in ipairs(transformed)do data[#data+1]=u16le(modelId)..u8(2)..u8(0) end
+	for _,modelId in ipairs(transformed)do data[#data+1]=u16le(modelId)..transforms[modelId] end
 	local payload=table.concat(data);return payload,#payload
 end
 
@@ -499,7 +526,7 @@ local function packBlockDefsUnsafe()
 		..u16le(checkedInt(A.STRIDE or A.TILE or 64,1,65535,"atlas stride"))..u16le(checkedInt(A.W or 4096,1,65535,"atlas width"))
 		..u16le(checkedInt(A.H or 4096,1,65535,"atlas height"))..u16le(0)..f32le(checkedNumber(A.INSET or .5,0,65535,"atlas inset"))
 		..u32le(#ids)..u32le(counts.orient)..u32le(counts.box)..u32le(counts.quad)..u32le(counts.template)
-		..u32le(stateCount)..u32le(visualBytes)..u32le(visualBytes>0 and 1 or 0)..schemaHash..visualHash
+		..u32le(stateCount)..u32le(visualBytes)..u32le(visualBytes>0 and 2 or 0)..schemaHash..visualHash
 	local blob=header..blockPayload..states..visualPayload
 	if #blob>MAX_BLOB_BYTES then error("definition blob too large",0) end
 	return blob, { emitters=emitterCensus, passes=passCensus }, #ids, passCensus[0], passCensus[1]
@@ -812,7 +839,7 @@ local function tryStart()
 	local blob, census, defCount, opaqueCount, translucentCount
 	local metadata = MC.BlockStateRegistryMetadata or {}
 	local catalog = MC.StateVisualCatalog or {}
-	local cacheKey = tostring( metadata.schemaHash or "" ) .. ":" .. tostring( catalog.visualPlanSha256 or "" )
+	local cacheKey = "mcbd4-visual2:" .. tostring( metadata.schemaHash or "" ) .. ":" .. tostring( catalog.visualPlanSha256 or "" )
 		.. ":" .. tostring( MC.BlockStateCount or 0 )
 	if state.defCache and state.defCache.key == cacheKey then
 		blob, census, defCount, opaqueCount, translucentCount = state.defCache.blob, state.defCache.census,

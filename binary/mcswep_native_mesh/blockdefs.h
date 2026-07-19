@@ -22,7 +22,7 @@ namespace mcmesh::blockdefs {
 	struct StateDef { uint16_t blockId = 0; uint8_t orient = 0, flags = 0; std::array<uint16_t, 5>stairPlans{}; };
 	struct VisualGeometry { uint32_t firstQuad = 0; uint16_t quadCount = 0; };
 	struct VisualSurfaceSet { uint32_t firstEntry = 0; uint16_t entryCount = 0; };
-	struct VisualModel { uint16_t geometryId = 0, surfaceId = 0; uint8_t uvRotationAdd = 0; };
+	struct VisualModel { uint16_t geometryId = 0, surfaceId = 0; std::array<uint8_t, 6> uvRotationAdd{}; };
 	struct VisualGroup { uint16_t firstAlternative = 0; uint8_t alternativeCount = 0; };
 	struct VisualAlternative { uint16_t modelId = 0; uint8_t weight = 0; };
 	struct VisualPlan { uint16_t firstGroup = 0; uint8_t groupCount = 0; };

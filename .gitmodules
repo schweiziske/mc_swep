@@ -2,11 +2,3 @@
 	path = binary/mcswep_native_mesh/include/garrysmod_common
 	url = https://github.com/danielga/garrysmod_common.git
 	branch = x86-64-support-sourcesdk
-[submodule "binary/mcswep_native_mesh/include/sourcesdk-minimal"]
-	path = binary/mcswep_native_mesh/include/sourcesdk-minimal
-	url = https://github.com/danielga/sourcesdk-minimal.git
-	branch = master
-[submodule "binary/mcswep_native_mesh/include/sourcesdk-minimal-x86-64-branch"]
-	path = binary/mcswep_native_mesh/include/sourcesdk-minimal-x86-64-branch
-	url = https://github.com/danielga/sourcesdk-minimal.git
-	branch = x86-64-branch
