@@ -371,10 +371,14 @@ local function stateMapPayload()
 			local block = MC.Blocks and MC.Blocks[blockId]
 			local stateFlags = exact and 1 or 0
 			local visual = MC.ResolveBlockStateVisual and MC.ResolveBlockStateVisual( stateId ) or nil
-			local stateFullCube = visual and MC.BlockVisualIsFullCube and MC.BlockVisualIsFullCube( visual ) == true
-				or ( not visual and MC.BlockIsFullCube and MC.BlockIsFullCube( blockId, orient ) == true )
+			local rule = block and ( block.stateRule or block.orient ) or nil
+			local keepGeneratedFaces = rule == "door"
+			local stateFullCube = not keepGeneratedFaces and (
+				visual and MC.BlockVisualIsFullCube and MC.BlockVisualIsFullCube( visual ) == true
+					or ( not visual and MC.BlockIsFullCube and MC.BlockIsFullCube( blockId, orient ) == true )
+			)
 			if stateFullCube then stateFlags = stateFlags + 4 end
-			if not visual or visual.cullGeneratedFaces ~= false then stateFlags = stateFlags + 8 end
+			if not keepGeneratedFaces and ( not visual or visual.cullGeneratedFaces ~= false ) then stateFlags = stateFlags + 8 end
 			if block and block.shape == "stairs" and MC.StateWith and MC.StateVisualPlanIdFast then
 				stateFlags = stateFlags + 2
 				for index, shape in ipairs( { "straight", "inner_left", "inner_right", "outer_left", "outer_right" } ) do

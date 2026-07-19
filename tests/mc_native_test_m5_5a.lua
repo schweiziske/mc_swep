@@ -25,6 +25,26 @@ concommand.Add( "mc_native_test_m5_5a", function()
 		end
 	end
 
+	local doorStates = 0
+	for blockId, schema in pairs( MC.BlockStateSchemas or {} ) do
+		local block = MC.Blocks and MC.Blocks[blockId]
+		local rule = block and ( block.stateRule or block.orient ) or nil
+		if rule == "door" and schema.firstStateId ~= nil and schema.lastStateId ~= nil then
+			for stateId = schema.firstStateId, schema.lastStateId do
+				local d = mcmesh.DebugStateDef( stateId )
+				if not istable( d ) then
+					fail( "door state " .. stateId .. " is missing native definition" )
+				elseif d.cullGeneratedFaces ~= false then
+					fail( "door state " .. stateId .. " enables native generated face culling" )
+				elseif d.fullCube == true then
+					fail( "door state " .. stateId .. " is a native full cube" )
+				end
+				doorStates = doorStates + 1
+			end
+		end
+	end
+	if doorStates == 0 then fail( "no door states checked" ) end
+
 	local checked = 0
 	for key, chunk in pairs( MC.World or {} ) do
 		if chunk and ( chunk.count or 0 ) > 0 then
@@ -48,7 +68,7 @@ concommand.Add( "mc_native_test_m5_5a", function()
 	if checked == 0 then fail( "no loaded non-empty chunks checked" ) end
 
 	if failures == 0 then
-		print( string.format( "[m5.5a] STATE TRANSPORT OK: states=%d chunks=%d", count, checked ) )
+		print( string.format( "[m5.5a] STATE TRANSPORT OK: states=%d chunks=%d doorStates=%d", count, checked, doorStates ) )
 	else
 		print( string.format( "[m5.5a] FAIL: failures=%d", failures ) )
 	end
