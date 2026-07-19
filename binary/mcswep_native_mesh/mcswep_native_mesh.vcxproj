@@ -118,7 +118,7 @@
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include\garrysmod_common\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include</AdditionalIncludeDirectories>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -162,7 +162,7 @@
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include\garrysmod_common\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include</AdditionalIncludeDirectories>
       <Optimization>Disabled</Optimization>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <WholeProgramOptimization>false</WholeProgramOptimization>
