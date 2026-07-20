@@ -121,6 +121,13 @@ namespace {
 }
 
 namespace mcmesh::meshbuild {
+    static void RecordTime(TimeProfile& profile, double us) {
+        ++profile.calls;
+        profile.lastUs = us;
+        profile.totalUs += us;
+        if (us > profile.maxUs) profile.maxUs = us;
+    }
+
 
     bool CaptureSectionSnapshot(uint64_t chunkKey, int sec, SectionSnapshot& out) {
         if (g_promise.SS <= 0 || sec < 0 || sec >= g_promise.SPC) return false;
@@ -238,19 +245,57 @@ namespace mcmesh::meshbuild {
             total.faces[i]=part.faces[i]>total.faces[i]?0:total.faces[i]-part.faces[i];
         }
     }
-    static bool ReplaceSectionMeshes(uint64_t key,int sec,const SectionBuild& build){
-        IMatRenderContext*ctx=RC();std::vector<IMesh*> opaque,translucent;
+    bool StageSectionMeshes(const SectionBuild& build, SectionMeshes& staged) {
+        staged = SectionMeshes{};
         try {
-            if(!CreateMeshList(build.opaque,g_promise.MatOpaque,opaque)||!CreateMeshList(build.translucent,g_promise.MatTranslucent,translucent)){DestroyMeshList(ctx,opaque);DestroyMeshList(ctx,translucent);return false;}
-            auto inserted=g_meshes.try_emplace(key); SectionMeshes&sm=inserted.first->second.section[sec];
-            auto oldO=std::move(sm.opaque),oldT=std::move(sm.translucent);
-            const EmitterStats oldStats=sm.emitters;
-            sm.opaque=std::move(opaque);sm.translucent=std::move(translucent);
-            sm.opaqueVerts=(int)build.opaque.vertices;sm.translucentVerts=(int)build.translucent.vertices;sm.emitters=build.emitters;
-            SubtractEmitterStats(g_emitterStats,oldStats);
-            for(size_t i=0;i<6;++i){g_emitterStats.blocks[i]+=build.emitters.blocks[i];g_emitterStats.faces[i]+=build.emitters.faces[i];}
-            DestroyMeshList(ctx,oldO);DestroyMeshList(ctx,oldT);return true;
-        } catch (...) { DestroyMeshList(ctx,opaque); DestroyMeshList(ctx,translucent); return false; }
+            if (!CreateMeshList(build.opaque, g_promise.MatOpaque, staged.opaque)
+                || !CreateMeshList(build.translucent, g_promise.MatTranslucent, staged.translucent)) {
+                DestroyStagedSectionMeshes(staged);
+                return false;
+            }
+            staged.opaqueVerts = (int)build.opaque.vertices;
+            staged.translucentVerts = (int)build.translucent.vertices;
+            staged.emitters = build.emitters;
+            return true;
+        }
+        catch (...) {
+            DestroyStagedSectionMeshes(staged);
+            return false;
+        }
+    }
+
+    void DestroyStagedSectionMeshes(SectionMeshes& staged) {
+        if (staged.opaque.empty() && staged.translucent.empty()) {
+            staged = SectionMeshes{};
+            return;
+        }
+        IMatRenderContext* ctx = RC();
+        DestroyMeshList(ctx, staged.opaque);
+        DestroyMeshList(ctx, staged.translucent);
+        staged = SectionMeshes{};
+    }
+
+    bool CommitStagedSectionMeshes(uint64_t key, int sec, SectionMeshes& staged) {
+        const double commitT0 = Plat_FloatTime();
+        try {
+            auto inserted = g_meshes.try_emplace(key);
+            SectionMeshes& live = inserted.first->second.section[sec];
+            SectionMeshes old = std::move(live);
+            live = std::move(staged);
+            SubtractEmitterStats(g_emitterStats, old.emitters);
+            for (size_t i = 0; i < 6; ++i) {
+                g_emitterStats.blocks[i] += live.emitters.blocks[i];
+                g_emitterStats.faces[i] += live.emitters.faces[i];
+            }
+            RecordTime(g_meshCommitProfile, (Plat_FloatTime() - commitT0) * 1e6);
+            const double destroyT0 = Plat_FloatTime();
+            DestroyStagedSectionMeshes(old);
+            RecordTime(g_meshDestroyProfile, (Plat_FloatTime() - destroyT0) * 1e6);
+            return true;
+        }
+        catch (...) {
+            return false;
+        }
     }
 
     void DestroyChunkMeshes(uint64_t chunkKey) {
@@ -279,6 +324,8 @@ namespace mcmesh::meshbuild {
 
     void StopWorkers() {
         meshworker::Stop();
+        for (auto& result : g_readyResults)
+            DestroyStagedSectionMeshes(result.stagedMeshes);
         g_readyResults.clear();
         g_generations.clear();
     }
@@ -307,6 +354,21 @@ namespace mcmesh::meshbuild {
         while (!g_readyResults.empty()) {
             if (finalized > 0 && (Plat_FloatTime() - t0) >= budgetSec) break;
             meshworker::Result& result = g_readyResults.front();
+            RecordTime(g_vertexBuildProfile, result.vertexBuildUs);
+            if constexpr (meshworker::kWorkerCreatesMeshes) {
+                RecordTime(g_meshStageProfile, result.meshStageUs);
+            }
+            else if (result.ok) {
+                const double stageT0 = Plat_FloatTime();
+                result.meshesReady = StageSectionMeshes(result.build, result.stagedMeshes);
+                result.meshStageUs = (Plat_FloatTime() - stageT0) * 1e6;
+                RecordTime(g_meshStageProfile, result.meshStageUs);
+                result.build = SectionBuild{};
+                if (!result.meshesReady) {
+                    result.ok = false;
+                    result.meshCreateFailed = true;
+                }
+            }
 
             const bool chunkAlive = ws::g_world.find(result.chunkKey) != ws::g_world.end();
             // dirty bit 重新置位说明快照之后世界又变了；即使新 job 尚未投递也不能上屏。
@@ -315,20 +377,28 @@ namespace mcmesh::meshbuild {
                 && !DirtyBitSet(result.chunkKey, result.section);
             if (!current) {
                 // jobsDropped 由 worker 统计队列丢弃；此处 stale 结果另行记账。
+                DestroyStagedSectionMeshes(result.stagedMeshes);
                 meshworker::RecordStaleDrop();
                 meshworker::ReleaseResult(result.resultBytes);
                 g_readyResults.pop_front();
                 continue;
             }
 
-            if (!result.ok || !result.build.ok) {
+            if (!result.ok || !result.meshesReady) {
+                const bool meshCreateFailed = result.meshCreateFailed;
+                DestroyStagedSectionMeshes(result.stagedMeshes);
                 meshworker::ReleaseResult(result.resultBytes);
                 g_readyResults.pop_front();
                 g_faulted = true;
-                g_faultReason = "worker_build_failed";
+                if (meshCreateFailed) {
+                    ++g_meshCreateFailures;
+                    g_faultReason = "worker_mesh_create_failed";
+                }
+                else g_faultReason = "worker_build_failed";
                 break;
             }
-            if (!ReplaceSectionMeshes(result.chunkKey, result.section, result.build)) {
+            if (!CommitStagedSectionMeshes(result.chunkKey, result.section, result.stagedMeshes)) {
+                DestroyStagedSectionMeshes(result.stagedMeshes);
                 meshworker::ReleaseResult(result.resultBytes);
                 g_readyResults.pop_front();
                 ++g_meshCreateFailures;
@@ -423,6 +493,7 @@ namespace mcmesh::meshbuild {
         g_generations.erase(key);
         for (auto it = g_readyResults.begin(); it != g_readyResults.end();) {
             if (it->chunkKey == key) {
+                DestroyStagedSectionMeshes(it->stagedMeshes);
                 meshworker::ReleaseResult(it->resultBytes);
                 meshworker::RecordStaleDrop();
                 it = g_readyResults.erase(it);
@@ -441,10 +512,61 @@ namespace mcmesh::meshbuild {
         return ws::ApplyChunk(LUA);
     }
 
+    int CreateChunk(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushBool(false); return 1; }
+        return ws::CreateChunk(LUA);
+    }
+
+    int ApplyChunkCells(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushBool(false); return 1; }
+        return ws::ApplyChunkCells(LUA);
+    }
+
+    int SetCell(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushBool(false); return 1; }
+        return ws::SetCell(LUA);
+    }
+
+    int GetCell(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushNil(); return 1; }
+        return ws::GetCell(LUA);
+    }
+
+    int GetChunkCells(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushNil(); return 1; }
+        return ws::GetChunkCells(LUA);
+    }
+
+    int RebuildBlockLight(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushBool(false); return 1; }
+        return ws::RebuildBlockLight(LUA);
+    }
+
+    int GetBlockLightChunk(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushNil(); return 1; }
+        return ws::GetBlockLightChunk(LUA);
+    }
+
+    int GetSkyLightChunk(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushNil(); return 1; }
+        return ws::GetSkyLightChunk(LUA);
+    }
+
+    int StartBlockLightRebuild(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushBool(false); return 1; }
+        return ws::StartBlockLightRebuild(LUA);
+    }
+
+    int PollBlockLightRebuild(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted) { LUA->PushBool(false); return 1; }
+        return ws::PollBlockLightRebuild(LUA);
+    }
+
     int ClearWorld(ILuaBase* LUA) {
         const size_t workerRemoved = meshworker::DiscardAll();
         for (size_t i = 0; i < workerRemoved; ++i) meshworker::ReleaseResult();
-        for (const auto& result : g_readyResults) {
+        for (auto& result : g_readyResults) {
+            DestroyStagedSectionMeshes(result.stagedMeshes);
             meshworker::ReleaseResult(result.resultBytes);
             meshworker::RecordStaleDrop();
         }
@@ -453,14 +575,17 @@ namespace mcmesh::meshbuild {
         DestroyAllMeshes();
         blockdefs::Unseal();
         g_faulted = false; g_faultReason = ""; g_lastThinkMS=0; g_lastBuildUs=0; g_meshCreateFailures=0; g_emitterStats={}; g_resultBytes=0;
+        g_vertexBuildProfile={}; g_meshStageProfile={}; g_meshCommitProfile={}; g_meshDestroyProfile={};
         return ws::ClearWorld(LUA);
     }
 
     int Shutdown(ILuaBase* LUA) {
         StopWorkers();
+        ws::StopBlockLightWorker();
         DestroyAllMeshes();
         blockdefs::Clear();
         g_faulted = false; g_faultReason = ""; g_lastThinkMS=0; g_lastBuildUs=0; g_meshCreateFailures=0; g_emitterStats={}; g_resultBytes=0;
+        g_vertexBuildProfile={}; g_meshStageProfile={}; g_meshCommitProfile={}; g_meshDestroyProfile={};
         ws::g_world.clear();
         ws::g_dirtyMask.clear();
         ws::g_dirtyQueue.clear(); ws::g_status={}; g_promise={};
@@ -499,14 +624,47 @@ namespace mcmesh::meshbuild {
         LUA->PushNumber(g_lastBuildUs); LUA->SetField(-2, "lastBuildUs");
         LUA->PushNumber(g_lastThinkMS); LUA->SetField(-2, "lastThinkMS");
         LUA->PushNumber(stats.workerCount); LUA->SetField(-2, "workerCount");
+        LUA->PushNumber((double)stats.maxInFlight); LUA->SetField(-2, "maxInFlight");
+        LUA->PushBool(stats.workerCreatesMeshes); LUA->SetField(-2, "workerCreatesMeshes");
         LUA->PushNumber((double)stats.queuedJobs); LUA->SetField(-2, "queuedJobs");
         LUA->PushNumber((double)stats.activeJobs); LUA->SetField(-2, "activeJobs");
         LUA->PushNumber((double)(stats.queuedResults + g_readyResults.size())); LUA->SetField(-2, "queuedResults");
         LUA->PushNumber((double)stats.jobsEnqueued); LUA->SetField(-2, "jobsEnqueued");
         LUA->PushNumber((double)stats.jobsDropped); LUA->SetField(-2, "jobsDropped");
         LUA->PushNumber((double)stats.resultBytes); LUA->SetField(-2, "resultBytes");
+        auto pushProfile = [LUA](const char* prefix, const TimeProfile& p) {
+            const std::string base(prefix);
+            LUA->PushNumber((double)p.calls); LUA->SetField(-2, (base + "Calls").c_str());
+            LUA->PushNumber(p.lastUs); LUA->SetField(-2, (base + "LastUs").c_str());
+            LUA->PushNumber(p.calls ? p.totalUs / (double)p.calls : 0.0); LUA->SetField(-2, (base + "AvgUs").c_str());
+            LUA->PushNumber(p.maxUs); LUA->SetField(-2, (base + "MaxUs").c_str());
+            LUA->PushNumber(p.totalUs / 1000.0); LUA->SetField(-2, (base + "TotalMS").c_str());
+        };
+        pushProfile("vertexBuild", g_vertexBuildProfile);
+        pushProfile("meshStage", g_meshStageProfile);
+        pushProfile("meshCommit", g_meshCommitProfile);
+        pushProfile("meshDestroy", g_meshDestroyProfile);
         LUA->PushNumber((double)ws::g_status.LastApplyDirty); LUA->SetField(-2, "lastApplyDirty");
+        LUA->PushNumber((double)ws::g_status.BatchCalls); LUA->SetField(-2, "nativeBatchCalls");
+        LUA->PushNumber((double)ws::g_status.BatchCells); LUA->SetField(-2, "nativeBatchCells");
+        LUA->PushNumber(ws::g_status.BatchLastMS); LUA->SetField(-2, "nativeBatchLastMS");
+        LUA->PushNumber(ws::g_status.BatchTotalMS); LUA->SetField(-2, "nativeBatchTotalMS");
+        LUA->PushNumber((double)ws::g_status.SetCellCalls); LUA->SetField(-2, "nativeSetCellCalls");
+        LUA->PushNumber(ws::g_status.SetCellLastUs); LUA->SetField(-2, "nativeSetCellLastUs");
+        LUA->PushNumber(ws::g_status.SetCellTotalMS); LUA->SetField(-2, "nativeSetCellTotalMS");
+        LUA->PushNumber((double)ws::g_status.LightRebuilds); LUA->SetField(-2, "nativeLightRebuilds");
+        LUA->PushNumber(ws::g_status.LightLastMS); LUA->SetField(-2, "nativeLightLastMS");
+        LUA->PushNumber((double)ws::g_status.LightSources); LUA->SetField(-2, "nativeLightSources");
+        LUA->PushNumber((double)ws::g_status.LightProcessed); LUA->SetField(-2, "nativeLightProcessed");
+        LUA->PushNumber((double)ws::g_status.LightWritten); LUA->SetField(-2, "nativeLightWritten");
+        LUA->PushNumber(ws::g_status.SkyLastMS); LUA->SetField(-2, "nativeSkyLastMS");
+        LUA->PushNumber((double)ws::g_status.SkySources); LUA->SetField(-2, "nativeSkySources");
+        LUA->PushNumber((double)ws::g_status.SkyProcessed); LUA->SetField(-2, "nativeSkyProcessed");
+        LUA->PushNumber((double)ws::g_status.SkyWritten); LUA->SetField(-2, "nativeSkyWritten");
+        LUA->PushNumber((double)ws::g_worldVersion); LUA->SetField(-2, "nativeWorldVersion");
         LUA->PushNumber((double)blockdefs::g_counts.states); LUA->SetField(-2, "stateDefinitions");
+        LUA->PushBool(blockdefs::g_lightEmission.size()==blockdefs::g_states.size()
+            && blockdefs::g_lightOpacity.size()==blockdefs::g_states.size()); LUA->SetField(-2, "lightDefinitionsLoaded");
         LUA->PushBool(blockdefs::g_visual.loaded); LUA->SetField(-2, "generatedCatalogLoaded");
         LUA->PushNumber((double)blockdefs::g_visual.catalogStateCount); LUA->SetField(-2, "generatedCatalogStates");
         LUA->PushNumber((double)blockdefs::g_visual.plans.size()); LUA->SetField(-2, "generatedPlans");

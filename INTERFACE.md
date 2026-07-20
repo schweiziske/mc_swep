@@ -38,7 +38,7 @@ native 是**平行渲染后端**,不是 Lua 建面函数的替换件:
 ### 握手 / 生命周期
 
 ```
-mcmesh.AbiVersion() -> number            -- 本契约 = 4
+mcmesh.AbiVersion() -> number            -- 本契约 = 3
 mcmesh.Handshake( cs, ch, sectionSize, bs, matOpaque, matTranslucent ) -> boolean
     扁平位置参数(2026-07-14 改, 原单 table 入参作废, C++ 侧直接
     CheckNumber(1..4) + CheckString(5..6) 取参; 原 dataHash 保留字段一并
@@ -58,7 +58,6 @@ mcmesh.SetBlockDefs( blob ) -> boolean
     MC.StateVisualCatalog 打包静态数据。M5.5 使用 **MCBD v4**：保留六类
     legacy typed emitter，并加入完整 stateId 表、schema/visual hash、compact
     plan/group/model/geometry/surface catalog、state fullCube/generated-cull flags、
-    state liquid kind/amount（流动液体高度为`amount/9`）、
     动态楼梯五路 plan、state tint code 与 typed model UV transform。M5.6 的
     visual extension v2支持按模型统一旋转和六面独立旋转：活塞继续使用统一`+2`，
     普通铁轨四种转角按Lua规则使用底面`+1`、其余面`+3`。MCBD visual extension

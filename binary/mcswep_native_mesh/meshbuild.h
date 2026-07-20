@@ -25,16 +25,27 @@ namespace mcmesh::meshbuild {
         EmitterStats emitters{};
     };
     struct ChunkMeshes { SectionMeshes section[64]; };
+    struct TimeProfile {
+        uint64_t calls = 0;
+        double lastUs = 0, totalUs = 0, maxUs = 0;
+    };
     inline std::unordered_map<uint64_t, ChunkMeshes> g_meshes;
     inline double g_lastThinkMS = 0, g_lastBuildUs = 0;
     inline uint64_t g_meshCreateFailures = 0, g_resultBytes = 0;
     inline EmitterStats g_emitterStats{};
+    inline TimeProfile g_vertexBuildProfile{}, g_meshStageProfile{}, g_meshCommitProfile{}, g_meshDestroyProfile{};
     inline bool g_faulted = false; inline const char* g_faultReason = "";
 
     bool CaptureSectionSnapshot(uint64_t chunkKey, int sec, SectionSnapshot& out);
     bool BuildSectionVerts(const SectionSnapshot& snapshot, SectionBuild& out);
+    bool StageSectionMeshes(const SectionBuild& build, SectionMeshes& staged);
+    bool CommitStagedSectionMeshes(uint64_t key, int sec, SectionMeshes& staged);
+    void DestroyStagedSectionMeshes(SectionMeshes& staged);
     void DestroyChunkMeshes(uint64_t chunkKey); void DestroyAllMeshes(); void StopWorkers();
-    int ApplyChunk(GarrysMod::Lua::ILuaBase*); int Think(GarrysMod::Lua::ILuaBase*);
+    int CreateChunk(GarrysMod::Lua::ILuaBase*); int ApplyChunk(GarrysMod::Lua::ILuaBase*); int ApplyChunkCells(GarrysMod::Lua::ILuaBase*);
+    int SetCell(GarrysMod::Lua::ILuaBase*); int GetCell(GarrysMod::Lua::ILuaBase*); int GetChunkCells(GarrysMod::Lua::ILuaBase*); int Think(GarrysMod::Lua::ILuaBase*);
+    int RebuildBlockLight(GarrysMod::Lua::ILuaBase*); int GetBlockLightChunk(GarrysMod::Lua::ILuaBase*); int GetSkyLightChunk(GarrysMod::Lua::ILuaBase*);
+    int StartBlockLightRebuild(GarrysMod::Lua::ILuaBase*); int PollBlockLightRebuild(GarrysMod::Lua::ILuaBase*);
     int DrawChunk(GarrysMod::Lua::ILuaBase*); int UnloadChunk(GarrysMod::Lua::ILuaBase*);
     int ClearWorld(GarrysMod::Lua::ILuaBase*); int GetStats(GarrysMod::Lua::ILuaBase*);
     int Shutdown(GarrysMod::Lua::ILuaBase*); int DebugBuildSection(GarrysMod::Lua::ILuaBase*);

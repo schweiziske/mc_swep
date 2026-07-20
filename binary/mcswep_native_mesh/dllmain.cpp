@@ -69,10 +69,22 @@ GMOD_MODULE_OPEN()
 	fa.AddFunction("Handshake", GTLUAF(mcmesh::handshake::Handshake));
 
 	// ---- 世界数据流入(worldstate 持有镜像 + diff; meshbuild 加握手守卫)----
+	fa.AddFunction("CreateChunk", GTLUAF(mcmesh::meshbuild::CreateChunk));
 	fa.AddFunction("ApplyChunk", GTLUAF(mcmesh::meshbuild::ApplyChunk));
+	fa.AddFunction("ApplyChunkCells", GTLUAF(mcmesh::meshbuild::ApplyChunkCells));
+	fa.AddFunction("SetCellsBatch", GTLUAF(mcmesh::meshbuild::ApplyChunkCells));
+	fa.AddFunction("SetCell", GTLUAF(mcmesh::meshbuild::SetCell));
+	fa.AddFunction("GetCell", GTLUAF(mcmesh::meshbuild::GetCell));
+	fa.AddFunction("GetChunkCells", GTLUAF(mcmesh::meshbuild::GetChunkCells));
+	fa.AddFunction("RebuildBlockLight", GTLUAF(mcmesh::meshbuild::RebuildBlockLight));
+	fa.AddFunction("StartBlockLightRebuild", GTLUAF(mcmesh::meshbuild::StartBlockLightRebuild));
+	fa.AddFunction("PollBlockLightRebuild", GTLUAF(mcmesh::meshbuild::PollBlockLightRebuild));
+	fa.AddFunction("GetBlockLightChunk", GTLUAF(mcmesh::meshbuild::GetBlockLightChunk));
+	fa.AddFunction("GetSkyLightChunk", GTLUAF(mcmesh::meshbuild::GetSkyLightChunk));
 
 	// ---- 方块静态数据 ----
 	fa.AddFunction("SetBlockDefs", GTLUAF(mcmesh::blockdefs::SetBlockDefs));
+	fa.AddFunction("SetLightDefs", GTLUAF(mcmesh::blockdefs::SetLightDefs));
 
 	// ---- 建面 / 帧循环 / 绘制(meshbuild; Unload/Clear 先毁 mesh 再转调 worldstate)----
 	fa.AddFunction("Think", GTLUAF(mcmesh::meshbuild::Think));
@@ -103,6 +115,7 @@ GMOD_MODULE_CLOSE()
 	// Lua Shutdown hook 不保证在模块卸载前必达；DLL close 是最终线程回收屏障。
 	// 引擎资源必须在线程完全停止后释放，避免 worker 仍持有建面数据。
 	mcmesh::meshbuild::StopWorkers();
+	mcmesh::worldstate::StopBlockLightWorker();
 	mcmesh::meshbuild::DestroyAllMeshes();
 	return 0;
 }

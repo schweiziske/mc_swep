@@ -13,10 +13,11 @@
 
 namespace mcmesh::meshworker {
 
-    constexpr int kWorkerCount = 3;
-    constexpr size_t kMaxInFlight = 32;
+    constexpr int kWorkerFallbackCount = 3;
+    constexpr size_t kMinInFlight = 16;
     constexpr size_t kMaxSectionResultBytes = 32u * 1024u * 1024u;
     constexpr size_t kMaxInFlightBytes = 128u * 1024u * 1024u;
+    constexpr bool kWorkerCreatesMeshes = false;
 
     struct Job {
         uint64_t chunkKey = 0;
@@ -30,9 +31,14 @@ namespace mcmesh::meshworker {
         int section = 0;
         uint64_t generation = 0;
         bool ok = true;
+        bool meshesReady = false;
+        bool meshCreateFailed = false;
         size_t resultBytes = 0;
         double buildUs = 0.0;
+        double vertexBuildUs = 0.0;
+        double meshStageUs = 0.0;
         meshbuild::SectionBuild build;
+        meshbuild::SectionMeshes stagedMeshes;
     };
 
     struct Stats {
@@ -44,6 +50,8 @@ namespace mcmesh::meshworker {
         uint64_t jobsEnqueued = 0;
         uint64_t jobsDropped = 0;
         int workerCount = 0;
+        size_t maxInFlight = 0;
+        bool workerCreatesMeshes = kWorkerCreatesMeshes;
     };
 
     bool Start();

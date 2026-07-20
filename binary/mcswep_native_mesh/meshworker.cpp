@@ -26,6 +26,7 @@ namespace {
     uint64_t g_jobsDropped = 0;
     size_t g_outstanding = 0;
     size_t g_resultBytes = 0;
+    size_t g_maxInFlight = mcmesh::meshworker::kMinInFlight;
 
     void WorkerMain() {
         for (;;) {
@@ -45,16 +46,36 @@ namespace {
             result.generation = job.generation;
             const double t0 = Plat_FloatTime();
             try {
+                const double vertexT0 = Plat_FloatTime();
                 result.ok = mcmesh::meshbuild::BuildSectionVerts(job.snapshot, result.build);
+                result.vertexBuildUs = (Plat_FloatTime() - vertexT0) * 1e6;
+                const size_t cpuBytes = (result.build.opaque.vertices + result.build.translucent.vertices)
+                    * sizeof(mcmesh::meshbuild::Vert);
+                if (result.ok && cpuBytes <= mcmesh::meshworker::kMaxSectionResultBytes) {
+                    if constexpr (mcmesh::meshworker::kWorkerCreatesMeshes) {
+                        const double stageT0 = Plat_FloatTime();
+                        result.meshesReady = mcmesh::meshbuild::StageSectionMeshes(result.build, result.stagedMeshes);
+                        result.meshStageUs = (Plat_FloatTime() - stageT0) * 1e6;
+                        if (!result.meshesReady) {
+                            result.ok = false;
+                            result.meshCreateFailed = true;
+                        }
+                        result.build = mcmesh::meshbuild::SectionBuild{};
+                    }
+                    else result.resultBytes = cpuBytes;
+                }
+                else if (result.ok) {
+                    result.ok = false;
+                }
             }
             catch (...) {
                 result.ok = false;
+                mcmesh::meshbuild::DestroyStagedSectionMeshes(result.stagedMeshes);
                 result.build = mcmesh::meshbuild::SectionBuild{};
                 result.build.ok = false;
             }
             result.buildUs = (Plat_FloatTime() - t0) * 1e6;
-            result.resultBytes = (result.build.opaque.vertices + result.build.translucent.vertices) * sizeof(mcmesh::meshbuild::Vert);
-            bool keep = result.resultBytes <= mcmesh::meshworker::kMaxSectionResultBytes;
+            bool keep = true;
             {
                 std::lock_guard<std::mutex> lock(g_jobMutex);
                 --g_activeJobs;
@@ -71,10 +92,13 @@ namespace {
                 // A queue allocation failure cannot be represented as a Result.
                 // Release the reservation directly; normal/oversized builds are
                 // always queued (oversized builds carry resultBytes == 0).
-                std::lock_guard<std::mutex> lock(g_jobMutex);
-                if (g_outstanding != 0) --g_outstanding;
-                g_resultBytes = result.resultBytes > g_resultBytes ? 0 : g_resultBytes - result.resultBytes;
-                ++g_jobsDropped;
+                {
+                    std::lock_guard<std::mutex> lock(g_jobMutex);
+                    if (g_outstanding != 0) --g_outstanding;
+                    g_resultBytes = result.resultBytes > g_resultBytes ? 0 : g_resultBytes - result.resultBytes;
+                    ++g_jobsDropped;
+                }
+                mcmesh::meshbuild::DestroyStagedSectionMeshes(result.stagedMeshes);
             }
             (void)queued;
         }
@@ -84,15 +108,20 @@ namespace {
 namespace mcmesh::meshworker {
 
     bool Start() {
+        const unsigned int detected = std::thread::hardware_concurrency();
+        const size_t workerCount = detected != 0
+            ? size_t(detected)
+            : size_t(kWorkerFallbackCount);
         {
             std::lock_guard<std::mutex> lock(g_jobMutex);
             if (g_running) return true;
             g_stop = false;
+            g_maxInFlight = std::max(kMinInFlight, workerCount);
         }
 
         try {
-            g_threads.reserve(kWorkerCount);
-            for (int i = 0; i < kWorkerCount; ++i)
+            g_threads.reserve(workerCount);
+            for (size_t i = 0; i < workerCount; ++i)
                 g_threads.emplace_back(WorkerMain);
         }
         catch (...) {
@@ -141,6 +170,8 @@ namespace mcmesh::meshworker {
         {
             std::lock_guard<std::mutex> lock(g_resultMutex);
             resultDrops = (uint64_t)g_results.size();
+            for (Result& result : g_results)
+                mcmesh::meshbuild::DestroyStagedSectionMeshes(result.stagedMeshes);
             g_results.clear();
         }
         if (resultDrops != 0) {
@@ -161,7 +192,7 @@ namespace mcmesh::meshworker {
         {
             std::lock_guard<std::mutex> lock(g_jobMutex);
             if (!g_running || g_stop) return false;
-            if (g_outstanding >= kMaxInFlight) return false;
+            if (g_outstanding >= g_maxInFlight) return false;
             g_jobs.push_back(std::move(job));
             ++g_jobsEnqueued;
             ++g_outstanding;
@@ -197,7 +228,12 @@ namespace mcmesh::meshworker {
             std::lock_guard<std::mutex> lock(g_resultMutex);
             const size_t before = g_results.size();
             g_results.erase(std::remove_if(g_results.begin(), g_results.end(),
-                [chunkKey,&removedBytes](const Result& result) { if(result.chunkKey==chunkKey){removedBytes+=result.resultBytes;return true;}return false; }), g_results.end());
+                [chunkKey,&removedBytes](Result& result) {
+                    if(result.chunkKey!=chunkKey)return false;
+                    removedBytes+=result.resultBytes;
+                    mcmesh::meshbuild::DestroyStagedSectionMeshes(result.stagedMeshes);
+                    return true;
+                }), g_results.end());
             resultDropped = (uint64_t)(before - g_results.size());
         }
         if (resultDropped != 0 || removedBytes != 0) {
@@ -219,7 +255,8 @@ namespace mcmesh::meshworker {
         size_t resultDrops = 0, removedBytes = 0;
         {
             std::lock_guard<std::mutex> lock(g_resultMutex);
-            resultDrops = g_results.size(); for(const auto&r:g_results)removedBytes+=r.resultBytes;
+            resultDrops = g_results.size();
+            for(auto& r:g_results){removedBytes+=r.resultBytes;mcmesh::meshbuild::DestroyStagedSectionMeshes(r.stagedMeshes);}
             g_results.clear();
         }
         if (resultDrops != 0 || removedBytes != 0) {
@@ -246,6 +283,8 @@ namespace mcmesh::meshworker {
             stats.jobsEnqueued = g_jobsEnqueued;
             stats.jobsDropped = g_jobsDropped;
             stats.workerCount = g_running ? (int)g_threads.size() : 0;
+            stats.maxInFlight = g_maxInFlight;
+            stats.workerCreatesMeshes = kWorkerCreatesMeshes;
         }
         {
             std::lock_guard<std::mutex> lock(g_resultMutex);

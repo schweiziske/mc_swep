@@ -9,14 +9,23 @@
 namespace mcmesh::worldstate {
     struct ChunkMirror {
         uint32_t stateId[mcmesh::kCellsPerChunk];
+        uint8_t blockLight[mcmesh::kCellsPerChunk]{};
+        uint8_t skyLight[mcmesh::kCellsPerChunk]{};
+        uint64_t version = 0;
     };
 
     struct Status {
         // 上一次标脏数量
         int LastApplyDirty;
+        uint64_t BatchCalls = 0, BatchCells = 0, SetCellCalls = 0;
+        double BatchLastMS = 0, BatchTotalMS = 0, SetCellLastUs = 0, SetCellTotalMS = 0;
+        uint64_t LightRebuilds = 0, LightSources = 0, LightProcessed = 0, LightWritten = 0;
+        uint64_t SkySources = 0, SkyProcessed = 0, SkyWritten = 0;
+        double LightLastMS = 0, SkyLastMS = 0;
     };
 
     inline std::unordered_map<uint64_t, std::unique_ptr<ChunkMirror>> g_world;
+    inline uint64_t g_worldVersion = 0;
     inline std::unordered_map<uint64_t, uint64_t> g_dirtyMask;  // chunkKey -> section 位掩码
     inline std::vector<uint64_t> g_dirtyQueue;                  // 入过队的 chunkKey, FIFO
     inline Status g_status;
@@ -153,6 +162,17 @@ namespace mcmesh::worldstate {
     }
 
     int ApplyChunk(ILuaBase* LUA);
+    int CreateChunk(ILuaBase* LUA);
+    int ApplyChunkCells(ILuaBase* LUA);
+    int SetCell(ILuaBase* LUA);
+    int GetCell(ILuaBase* LUA);
+    int GetChunkCells(ILuaBase* LUA);
+    int RebuildBlockLight(ILuaBase* LUA);
+    int GetBlockLightChunk(ILuaBase* LUA);
+    int GetSkyLightChunk(ILuaBase* LUA);
+    int StartBlockLightRebuild(ILuaBase* LUA);
+    int PollBlockLightRebuild(ILuaBase* LUA);
+    void StopBlockLightWorker();
     int UnloadChunk(ILuaBase* LUA);
     int ClearWorld(ILuaBase* LUA);
 
