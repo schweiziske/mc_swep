@@ -9,7 +9,7 @@ using namespace GarrysMod::Lua;
 namespace mcmesh::handshake {
 	// 返回版本信息
 	inline int AbiVersion(ILuaBase* LUA) {
-		LUA->PushNumber(4);
+		LUA->PushNumber(5);
 		return 1;
 	}
 

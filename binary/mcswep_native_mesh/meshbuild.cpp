@@ -669,6 +669,12 @@ namespace mcmesh::meshbuild {
         LUA->PushNumber((double)ws::g_status.SkySources); LUA->SetField(-2, "nativeSkySources");
         LUA->PushNumber((double)ws::g_status.SkyProcessed); LUA->SetField(-2, "nativeSkyProcessed");
         LUA->PushNumber((double)ws::g_status.SkyWritten); LUA->SetField(-2, "nativeSkyWritten");
+        LUA->PushNumber((double)ws::g_status.IncrementalLightUpdates); LUA->SetField(-2, "nativeIncrementalLightUpdates");
+        LUA->PushNumber((double)ws::g_status.IncrementalLightCells); LUA->SetField(-2, "nativeIncrementalLightCells");
+        LUA->PushNumber(ws::g_status.IncrementalLightLastMS); LUA->SetField(-2, "nativeIncrementalLightLastMS");
+        LUA->PushNumber((double)ws::g_status.AsyncPartialCommits); LUA->SetField(-2, "nativeAsyncPartialCommits");
+        LUA->PushNumber((double)ws::g_status.AsyncDeferredChunks); LUA->SetField(-2, "nativeAsyncDeferredChunks");
+        LUA->PushBool(ws::g_lightFieldReady); LUA->SetField(-2, "nativeLightFieldReady");
         LUA->PushNumber((double)ws::g_worldVersion); LUA->SetField(-2, "nativeWorldVersion");
         LUA->PushNumber((double)blockdefs::g_counts.states); LUA->SetField(-2, "stateDefinitions");
         LUA->PushBool(blockdefs::g_lightEmission.size()==blockdefs::g_states.size()

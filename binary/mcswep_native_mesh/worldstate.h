@@ -12,6 +12,7 @@ namespace mcmesh::worldstate {
         uint8_t blockLight[mcmesh::kCellsPerChunk]{};
         uint8_t skyLight[mcmesh::kCellsPerChunk]{};
         uint64_t version = 0;
+        bool lightValid = false;
     };
 
     struct Status {
@@ -22,10 +23,14 @@ namespace mcmesh::worldstate {
         uint64_t LightRebuilds = 0, LightSources = 0, LightProcessed = 0, LightWritten = 0;
         uint64_t SkySources = 0, SkyProcessed = 0, SkyWritten = 0;
         double LightLastMS = 0, SkyLastMS = 0;
+        uint64_t IncrementalLightUpdates = 0, IncrementalLightCells = 0;
+        uint64_t AsyncPartialCommits = 0, AsyncDeferredChunks = 0;
+        double IncrementalLightLastMS = 0;
     };
 
     inline std::unordered_map<uint64_t, std::unique_ptr<ChunkMirror>> g_world;
     inline uint64_t g_worldVersion = 0;
+    inline bool g_lightFieldReady = false;
     inline std::unordered_map<uint64_t, uint64_t> g_dirtyMask;  // chunkKey -> section 位掩码
     inline std::vector<uint64_t> g_dirtyQueue;                  // 入过队的 chunkKey, FIFO
     inline Status g_status;
