@@ -20,7 +20,13 @@ namespace mcmesh::Test {
     }
 
     static void BuildSpikeMesh(IMaterial* mat) {
-        IMatRenderContext* ctx = g_matsys->GetRenderContext();
+        if (!g_matsys || !SupportsNativeMeshVertexFormat(mat)) return;
+        CMatRenderContextPtr ctx(g_matsys);
+        if (!ctx) return;
+        if (g_mesh) {
+            ctx->DestroyStaticMesh(g_mesh);
+            g_mesh = nullptr;
+        }
         // 2013 系 SDK 里 CreateStaticMesh 在渲染上下文上; 若你的头文件里它在
         // IMaterialSystem 上, 以头文件为准
         VertexFormat_t fmt = mat->GetVertexFormat();
@@ -47,11 +53,15 @@ namespace mcmesh::Test {
 
     static void RebuildSpikeMeshFromVerts(IMaterial* mat, float* vs, int numVerts) {
         // 1. 安全检查：防止空指针或无效顶点数
-        if (!mat || !vs || numVerts <= 0) return;
+        if (!g_matsys || !SupportsNativeMeshVertexFormat(mat) || !vs || numVerts <= 0 || (numVerts % 3) != 0) return;
 
         // 2. 获取渲染上下文
-        IMatRenderContext* ctx = g_matsys->GetRenderContext();
+        CMatRenderContextPtr ctx(g_matsys);
         if (!ctx) return;
+        if (g_mesh) {
+            ctx->DestroyStaticMesh(g_mesh);
+            g_mesh = nullptr;
+        }
 
         // 3. 获取材质期望的顶点格式，并剥离压缩位（防止格式不匹配导致的渲染异常）
         VertexFormat_t fmt = mat->GetVertexFormat();
@@ -115,6 +125,7 @@ namespace mcmesh::Test {
 
 	int DrawChunk(ILuaBase* LUA);
     int mcmesh_SpikeQuad(ILuaBase* LUA);
+    void DestroyDebugMesh();
     int DebugGetCell(ILuaBase* LUA);
     int mcmesh_DebugClearDirty(ILuaBase* LUA);
 }

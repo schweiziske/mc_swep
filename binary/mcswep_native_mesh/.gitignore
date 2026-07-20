@@ -1,5 +1,6 @@
 .vs/
 Release/
+Release_Final/
 x64/
 *.user
 *.obj

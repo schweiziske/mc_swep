@@ -116,6 +116,7 @@ GMOD_MODULE_CLOSE()
 	// 引擎资源必须在线程完全停止后释放，避免 worker 仍持有建面数据。
 	mcmesh::meshbuild::StopWorkers();
 	mcmesh::worldstate::StopBlockLightWorker();
+	mcmesh::Test::DestroyDebugMesh();
 	mcmesh::meshbuild::DestroyAllMeshes();
 	return 0;
 }

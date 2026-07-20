@@ -1,6 +1,7 @@
 ﻿#include "pch.h"
 #include "test.h"
 #include <array>
+#include <cmath>
 #include <vector>
 #include "global.h"
 #include "worldstate.h"
@@ -22,18 +23,32 @@ namespace mcmesh::Test {
     int mcmesh_SpikeQuad(ILuaBase* LUA) {
         LUA->CheckType(1, GarrysMod::Lua::Type::Table);
         int n = (int)LUA->ObjLen(1);
-        if (n % 14 != 0 || n == 0 || n > 14 * 600) { LUA->PushBool(false); return 1; }
+        const int vertexCount = n / 14;
+        if (n % 14 != 0 || vertexCount == 0 || vertexCount > 600 || (vertexCount % 3) != 0) { LUA->PushBool(false); return 1; }
         std::vector<float> v(n);
         for (int i = 1; i <= n; i++) {
             LUA->PushNumber(i); LUA->GetTable(1);
-            v[i - 1] = (float)LUA->GetNumber(-1); LUA->Pop();
+            if (!LUA->IsType(-1, GarrysMod::Lua::Type::Number)) {
+                LUA->Pop(); LUA->PushBool(false); return 1;
+            }
+            const double value = LUA->GetNumber(-1); LUA->Pop();
+            if (!std::isfinite(value)) { LUA->PushBool(false); return 1; }
+            v[i - 1] = (float)value;
         }
         IMaterial* mat = g_matsys->FindMaterial("!mc_atlas_gpu_lighttex_fancy13_localdeps_vface_opaque", TEXTURE_GROUP_OTHER);
-        RebuildSpikeMeshFromVerts(mat, v.data(), n / 14);   // CMeshBuilder 逐顶点:
+        RebuildSpikeMeshFromVerts(mat, v.data(), vertexCount);   // CMeshBuilder 逐顶点:
         // Position3f / Normal3f / TexCoord2f(0,..) / TexCoord2f(1,..) / Color4ub / AdvanceVertex
         if (g_mesh) g_mesh->Draw();
         LUA->PushBool(g_mesh != nullptr);
         return 1;
+    }
+
+    void DestroyDebugMesh() {
+        if (!g_mesh || !g_matsys) return;
+        CMatRenderContextPtr ctx(g_matsys);
+        if (!ctx) return;
+        ctx->DestroyStaticMesh(g_mesh);
+        g_mesh = nullptr;
     }
 
     int DebugGetCell(ILuaBase* LUA) {

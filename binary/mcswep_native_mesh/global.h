@@ -40,4 +40,15 @@ namespace mcmesh {
 	inline IMaterialSystem* g_matsys = nullptr;
 	inline IMesh* g_mesh = nullptr;
 	inline Promise g_promise;
+
+	// 现行 GPU 材质(mc_gpu_chunk_lighttex_vs30)顶点输入只有 pos + uv0;
+	// normal/color/uv1 按 14-float 契约照写,格式缺失分量时 CMeshBuilder 写入为
+	// 无害空操作,不得作为材质格式的硬性要求(见 INTERFACE.md spike 记录)。
+	inline bool SupportsNativeMeshVertexFormat(IMaterial* material)
+	{
+		if (!material || material->IsErrorMaterial()) return false;
+		const VertexFormat_t format = material->GetVertexFormat() & ~VERTEX_FORMAT_COMPRESSED;
+		return (VertexFlags(format) & VERTEX_POSITION) != 0
+			&& TexCoordSize(0, format) >= 2;
+	}
 }

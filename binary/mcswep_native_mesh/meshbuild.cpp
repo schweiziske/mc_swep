@@ -89,10 +89,6 @@ namespace {
         return g_promise.SS > 0 && blockdefs::g_loaded;
     }
 
-    inline IMatRenderContext* RC() {
-        return g_matsys ? g_matsys->GetRenderContext() : nullptr;
-    }
-
     using GenerationArray = std::array<uint64_t, 64>;
     std::unordered_map<uint64_t, GenerationArray> g_generations;
     uint64_t g_nextGeneration = 0;
@@ -196,12 +192,11 @@ namespace mcmesh::meshbuild {
         IMesh* mesh = nullptr;
     };
 
-    static MeshCreateResult CreateMeshFromVerts(const std::vector<Vert>& verts, IMaterial* mat) {
+    static MeshCreateResult CreateMeshFromVerts(IMatRenderContext* ctx, const std::vector<Vert>& verts, IMaterial* mat) {
         if (verts.empty()) return { MeshCreateStatus::Empty, nullptr };
         if (verts.size() > mcmesh::MAX_VERTEX_COUNT || (verts.size() % 3) != 0)
             return { MeshCreateStatus::Failed, nullptr };
-        if (!mat || mat->IsErrorMaterial()) return { MeshCreateStatus::Failed, nullptr };
-        IMatRenderContext* ctx = RC();
+        if (!SupportsNativeMeshVertexFormat(mat)) return { MeshCreateStatus::Failed, nullptr };
         if (!ctx) return { MeshCreateStatus::Failed, nullptr };
 
         const VertexFormat_t fmt = mat->GetVertexFormat();
@@ -229,10 +224,10 @@ namespace mcmesh::meshbuild {
         mesh = nullptr;
     }
 
-    static bool CreateMeshList(const PassVerts& pass, IMaterial* mat, std::vector<IMesh*>& out) {
-        IMatRenderContext* ctx=RC();
+    static bool CreateMeshList(IMatRenderContext* ctx, const PassVerts& pass, IMaterial* mat, std::vector<IMesh*>& out) {
+        if (!ctx) return false;
         for (const auto& batch:pass.batches) {
-            MeshCreateResult made=CreateMeshFromVerts(batch.verts,mat);
+            MeshCreateResult made=CreateMeshFromVerts(ctx,batch.verts,mat);
             if (made.status==MeshCreateStatus::Failed) { for(IMesh*&m:out) DestroyMesh(ctx,m); out.clear(); return false; }
             if (made.mesh) out.push_back(made.mesh);
         }
@@ -247,10 +242,15 @@ namespace mcmesh::meshbuild {
     }
     bool StageSectionMeshes(const SectionBuild& build, SectionMeshes& staged) {
         staged = SectionMeshes{};
+        if (!g_matsys) return false;
+        CMatRenderContextPtr ctx(g_matsys);
+        if (!ctx) return false;
         try {
-            if (!CreateMeshList(build.opaque, g_promise.MatOpaque, staged.opaque)
-                || !CreateMeshList(build.translucent, g_promise.MatTranslucent, staged.translucent)) {
-                DestroyStagedSectionMeshes(staged);
+            if (!CreateMeshList(ctx, build.opaque, g_promise.MatOpaque, staged.opaque)
+                || !CreateMeshList(ctx, build.translucent, g_promise.MatTranslucent, staged.translucent)) {
+                DestroyMeshList(ctx, staged.opaque);
+                DestroyMeshList(ctx, staged.translucent);
+                staged = SectionMeshes{};
                 return false;
             }
             staged.opaqueVerts = (int)build.opaque.vertices;
@@ -259,7 +259,9 @@ namespace mcmesh::meshbuild {
             return true;
         }
         catch (...) {
-            DestroyStagedSectionMeshes(staged);
+            DestroyMeshList(ctx, staged.opaque);
+            DestroyMeshList(ctx, staged.translucent);
+            staged = SectionMeshes{};
             return false;
         }
     }
@@ -269,7 +271,9 @@ namespace mcmesh::meshbuild {
             staged = SectionMeshes{};
             return;
         }
-        IMatRenderContext* ctx = RC();
+        if (!g_matsys) return;
+        CMatRenderContextPtr ctx(g_matsys);
+        if (!ctx) return;
         DestroyMeshList(ctx, staged.opaque);
         DestroyMeshList(ctx, staged.translucent);
         staged = SectionMeshes{};
@@ -301,7 +305,9 @@ namespace mcmesh::meshbuild {
     void DestroyChunkMeshes(uint64_t chunkKey) {
         auto it = g_meshes.find(chunkKey);
         if (it == g_meshes.end()) return;
-        IMatRenderContext* ctx = RC();
+        if (!g_matsys) return;
+        CMatRenderContextPtr ctx(g_matsys);
+        if (!ctx) return;
         for (int i = 0; i < 64; ++i) {
             SubtractEmitterStats(g_emitterStats,it->second.section[i].emitters);
             DestroyMeshList(ctx, it->second.section[i].opaque);
@@ -311,7 +317,9 @@ namespace mcmesh::meshbuild {
     }
 
     void DestroyAllMeshes() {
-        IMatRenderContext* ctx = RC();
+        if (!g_matsys) return;
+        CMatRenderContextPtr ctx(g_matsys);
+        if (!ctx) return;
         for (auto& kv : g_meshes)
             for (int i = 0; i < 64; ++i) {
                 SubtractEmitterStats(g_emitterStats,kv.second.section[i].emitters);

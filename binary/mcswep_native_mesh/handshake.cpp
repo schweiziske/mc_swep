@@ -34,7 +34,7 @@ namespace mcmesh::handshake {
         unsigned int lo = 0, lt = 0; const char* mo = LUA->GetString(5, &lo); const char* mt = LUA->GetString(6, &lt);
         if (!mo || !mt || !lo || !lt || !g_matsys) { LUA->PushBool(false); return 1; }
         IMaterial* a = g_matsys->FindMaterial(mo, TEXTURE_GROUP_OTHER), * b = g_matsys->FindMaterial(mt, TEXTURE_GROUP_OTHER);
-        if (!a || !b || a->IsErrorMaterial() || b->IsErrorMaterial()) { LUA->PushBool(false); return 1; }
+        if (!SupportsNativeMeshVertexFormat(a) || !SupportsNativeMeshVertexFormat(b)) { LUA->PushBool(false); return 1; }
         g_promise.CS = cs; g_promise.CH = ch; g_promise.SS = ss; g_promise.BS = bs; g_promise.NSX = int(nsx); g_promise.NSZ = int(nsz); g_promise.CPC = int(cpc); g_promise.SPC = int(spc); g_promise.MatOpaque = a; g_promise.MatTranslucent = b;
         LUA->PushBool(true); return 1;
     }
