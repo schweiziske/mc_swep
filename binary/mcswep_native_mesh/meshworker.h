@@ -13,8 +13,8 @@
 
 namespace mcmesh::meshworker {
 
-    constexpr int kWorkerCount = 1;
-    constexpr size_t kMaxInFlight = 16;
+    constexpr int kWorkerCount = 3;
+    constexpr size_t kMaxInFlight = 32;
     constexpr size_t kMaxSectionResultBytes = 32u * 1024u * 1024u;
     constexpr size_t kMaxInFlightBytes = 128u * 1024u * 1024u;
 
