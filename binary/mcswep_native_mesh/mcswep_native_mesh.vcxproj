@@ -155,8 +155,8 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include</AdditionalIncludeDirectories>
-      <Optimization>Disabled</Optimization>
-      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <Optimization>MaxSpeed</Optimization>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -226,9 +226,9 @@
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include</AdditionalIncludeDirectories>
-      <Optimization>Disabled</Optimization>
+      <Optimization>MaxSpeed</Optimization>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
