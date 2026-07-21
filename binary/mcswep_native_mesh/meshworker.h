@@ -14,7 +14,7 @@
 namespace mcmesh::meshworker {
 
     constexpr int kWorkerFallbackCount = 8;
-    constexpr size_t kMinInFlight = 16;
+    constexpr size_t kMinInFlight = 8;
     constexpr size_t kMaxSectionResultBytes = 32u * 1024u * 1024u;
     constexpr size_t kMaxInFlightBytes = 128u * 1024u * 1024u;
     constexpr bool kWorkerCreatesMeshes = false;

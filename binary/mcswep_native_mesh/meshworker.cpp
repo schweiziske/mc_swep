@@ -110,7 +110,7 @@ namespace mcmesh::meshworker {
     bool Start() {
         const unsigned int detected = std::thread::hardware_concurrency();
         const size_t workerCount = detected != 0
-            ? size_t(detected)
+            ? std::max<size_t>(1, size_t(detected) / 2)
             : size_t(kWorkerFallbackCount);
         {
             std::lock_guard<std::mutex> lock(g_jobMutex);

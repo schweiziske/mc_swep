@@ -12,6 +12,8 @@ namespace mcmesh::blockdefs {
 	enum class ConnectionKind :uint8_t { None = 0, Fence = 1, Pane = 2, Bars = 3, Wall = 4, Pipe6 = 5 };
 	constexpr uint16_t FLAG_TRANSPARENT = 1u, FLAG_SOLID = 2u, FLAG_KNOWN_MASK = 3u;
 	constexpr uint8_t CAP_FENCE = 1u, CAP_PANE = 2u, CAP_WALL = 4u, CAP_PIPE6 = 8u, CAP_END_STONE_DOWN = 16u, CAP_KNOWN_MASK = 31u;
+	constexpr uint8_t STATE_LEGACY_EXACT = 1u, STATE_STAIRS = 2u, STATE_FULL_CUBE = 4u,
+		STATE_CULL_GENERATED_FACES = 8u, STATE_USE_GENERATED_VISUAL = 16u, STATE_KNOWN_MASK = 31u;
 	struct AtlasParams { uint16_t cols = 0, rows = 0, tile = 0, pad = 0, stride = 0, w = 0, h = 0; float inset = 0; bool valid = false; };
 	struct FaceTexture { uint16_t tile = 0; std::array<float, 8>uv{}; };
 	struct Box { float v[6]{}; };
