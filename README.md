@@ -21,3 +21,9 @@ DLL downloads are available on the [Releases page](https://github.com/schweizisk
 Minecraft Java Edition world import tools are available in the [`tools` folder](tools/).
 
 See [`tools/README.md`](tools/README.md) for usage instructions.
+
+## Shader Sources
+
+The HLSL source used by the Fancy lighting path and default shadow-map mode is available in the [`shaders` folder](shaders/).
+
+Source Engine uses `.fxc` for shader entry points and `.fxh` for shared HLSL includes. See [`shaders/README.md`](shaders/README.md) for the file-to-runtime-shader mapping and build requirements.

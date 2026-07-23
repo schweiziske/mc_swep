@@ -1,0 +1,668 @@
+#define HDRTYPE HDR_TYPE_NONE
+#include "common_ps_fxc.h"
+#include "mc_gpu_shadow_pcf.fxh"
+#include "mc_gpu_block_tint.fxh"
+
+#ifndef MC_LINEAR_SHADOW_DEBUG
+#define MC_LINEAR_SHADOW_DEBUG 0
+#endif
+
+#ifndef MC_SEPARATE_FACE_LIGHTING
+#define MC_SEPARATE_FACE_LIGHTING 0
+#endif
+
+sampler BaseTextureSampler : register(s0);
+sampler ChunkLightSampler  : register(s1);
+sampler GlobalLightmapSampler : register(s2);
+sampler ShadowMapSampler : register(s3);
+
+// Register layout must match what GMod's screenspace_general family actually
+// uploads (verified by disassembling csm_gshader_ps30.vcs / csm_point_lights_ps30.vcs):
+//   $c0_*..$c3_*     -> c0..c3
+//   $viewprojmat     -> c11..c14 (near-cascade view-proj)
+//   $invviewprojmat  -> c15..c18 (cascade remap table, declared + used below)
+// This fancy variant DOES use $c3 (declared and consumed below), so its
+// material must define $c3_* — and the plain smooth material must NOT.
+float4 mcShadowParams : register(c0);      // x: strength, y: bias (mc) / contrast (screen), z: enable, w: mode
+float4 mcShadowLightDir : register(c1);    // xyz: light forward, w: 1/zfar
+float4 mcShadowLightOrigin : register(c2); // xyz: shadow camera origin, w: PCF kernel step (uv)
+float4 mcShadowFancy : register(c3);       // x: shadow cool tint, y: window edge fade, z: back-face shade, w: warmth
+float4x4 viewprojmat : register(c11);
+// Cascade remap table uploaded through $invviewprojmat (c15..c18). The current
+// clean PCF path consumes c15, c16 and c18. Row c17 is still uploaded by Lua
+// for compatibility with the removed normal-offset-bias path, but it is not
+// consumed by the compiled shader. Rows c15/c16 map near-cascade clip space
+// onto cascade 1/2's clip space (all cascades share one camera basis, so the
+// relation is affine): clip_k.xy = clip_0.xy * row.x + row.yz.
+float4 mcCsmCascade1 : register(c15);
+float4 mcCsmCascade2 : register(c16);
+float4 mcCsmNearInfo : register(c17);      // DEPRECATED/UNUSED: legacy near-cascade half-radius
+float4 mcCsmParams : register(c18);        // x: cascade pad, y: edge fade, z: DEPRECATED/UNUSED 1/mapSize
+
+static const float MC_BLOCK_SIZE = 36.5f;
+static const float MC_LIGHT_PAD = 1.0f;
+static const float MC_LIGHT_GRID_XY = 18.0f;
+static const float MC_LIGHT_GRID_Z = 34.0f;
+static const float MC_LIGHT_FACE_EPS = 0.01f;
+static const float MC_GLOBAL_LIGHTMAP_SIZE = 16.0f;
+
+// ---- chunk light atlas ----
+// Every loaded chunk's light grid lives in ONE 4096x4096 atlas of 128x128
+// tiles (32x32 grid) on sampler1. Tile 0 is always white (fallback for
+// not-yet-baked chunks); tiles 1..2 host the indirection table. For residue
+// index i = (cx mod 32) + (cy mod 32)*32 + (cz mod 8)*1024, four adjacent
+// texels beginning at x = 128 + (i*4 mod 256), y = floor(i*4/256) store the
+// owning tile index as 12 threshold bits (black -> tile 0 -> white). The chunk
+// coordinate comes free from the interpolators: vWorldPos - vLocalPos is the
+// chunk origin (translation-only model matrix), so NO per-chunk material state
+// exists at draw time.
+static const float MC_LIGHT_ATLAS_SIZE = 4096.0f;
+static const float MC_LIGHT_TILE = 128.0f;
+static const float3 MC_CHUNK_WORLD = float3( 584.0f, 584.0f, 1168.0f ); // 16/16/32 blocks * 36.5
+static const float3 MC_LIGHT_WRAP = float3( 32.0f, 32.0f, 8.0f );
+
+static float2 g_lightTileOrigin = float2( 0.0f, 0.0f ); // atlas texels, set once in main
+
+// The tile index is stored as 12 THRESHOLD BITS (each channel 0 or 255) over
+// four adjacent texels at (128 + i*4 .. +3, i*4 / 256) and decoded with
+// step(0.5): full-range values survive ANY write- or read-side gamma, dither
+// or precision loss in the RT path. Raw byte indices do not — surface writes
+// were measured up to +-5 off, which scattered chunks onto wrong tiles.
+// Decoded value = tileCol + tileRow * 32; 0 -> tile 0 -> white fallback.
+float2 chunkLightTileOrigin( float3 worldPos, float3 localPos )
+{
+	float3 chunkCoord = floor( ( worldPos - localPos ) / MC_CHUNK_WORLD + 0.5f );
+	float3 residue = chunkCoord - floor( chunkCoord / MC_LIGHT_WRAP ) * MC_LIGHT_WRAP;
+	float index = residue.x + residue.y * 32.0f + residue.z * 1024.0f;
+	float texelBase = index * 4.0f;
+	float irow = floor( texelBase / 256.0f );
+	float icol = texelBase - irow * 256.0f;
+	float value = 0.0f;
+	float weight = 1.0f;
+	for ( int k = 0; k < 4; ++k )
+	{
+		float2 uv = float2( MC_LIGHT_TILE + icol + ( float )k + 0.5f, irow + 0.5f ) / MC_LIGHT_ATLAS_SIZE;
+		float3 bits = step( 0.5f, tex2D( ChunkLightSampler, uv ).rgb );
+		value += dot( bits, float3( weight, weight * 2.0f, weight * 4.0f ) );
+		weight *= 8.0f;
+	}
+	float tileRow = floor( value / 32.0f );
+	float tileCol = value - tileRow * 32.0f;
+	return float2( tileCol, tileRow ) * MC_LIGHT_TILE;
+}
+
+// Grade colors for the fancy pass: cool shadows, warm sun, warm torch light.
+static const float3 MC_SHADOW_TINT = float3( 0.72f, 0.85f, 1.18f );
+static const float3 MC_SUN_WARM = float3( 1.06f, 1.01f, 0.94f );
+static const float3 MC_TORCH_WARM = float3( 1.10f, 0.97f, 0.82f );
+// Moonlight blue for the night tint; weight arrives in the light texture's
+// r channel (baked in Lua as night amount x sky dominance).
+static const float3 MC_NIGHT_TINT = float3( 0.62f, 0.74f, 1.12f );
+// Bloom source colors. The material pass cannot blur neighbouring pixels, so
+// it only shapes a compact high-luminance seed; cl_mesh_bloom.lua extracts and
+// spreads that seed after the scene is rendered. Keeping the source tied to
+// voxel block light / shadowed direct sun prevents dark walls from glowing.
+static const float3 MC_TORCH_BLOOM = float3( 1.00f, 0.58f, 0.24f );
+static const float3 MC_SUN_BLOOM = float3( 1.00f, 0.91f, 0.72f );
+// Split of the lightmap's sky axis into ambient vs direct sun: shadowed
+// outdoor ground keeps this fraction of the full sky term (Minecraft
+// shaderpacks: ambient scales with voxel sky light, DIRECT sun does not —
+// it is gated only by the shadow map, so ground under a big structure that
+// the sun still reaches stays bright).
+static const float MC_SKY_AMBIENT_FRAC = 0.35f;
+
+// _centroid: under MSAA, an edge pixel whose center lies outside the triangle
+// otherwise EXTRAPOLATES every interpolant — UV lands past the atlas gutter
+// (alpha-test holes) and local/world pos past the face (wrong light cell /
+// wrong shadow verdict) — the block-edge seam artifact.
+struct PS_INPUT
+{
+	float2 vTexCoord : TEXCOORD0_centroid;
+	float3 vLocalPos : TEXCOORD1_centroid;
+	float3 vWorldPos : TEXCOORD2_centroid;
+	float4 vColor    : TEXCOORD3_centroid;
+	float4 vClipPos  : TEXCOORD4_centroid;
+};
+
+float3 applyBloomSeed( float3 lit, float3 normal, float blockUnit,
+	float vis, float facing, float warmth )
+{
+	float luma = dot( lit, float3( 0.2126f, 0.7152f, 0.0722f ) );
+	float torchField = smoothstep( 0.48f, 0.96f, blockUnit );
+	float torchDetail = smoothstep( 0.16f, 0.68f, luma );
+	float torchSeed = torchField * torchDetail * ( 0.22f + 0.40f * warmth );
+
+	float directSun = saturate( vis * facing );
+	float sunSeed = smoothstep( 0.72f, 1.0f, directSun )
+		* smoothstep( 0.56f, 0.94f, luma ) * 0.070f;
+	float grazing = pow( saturate( 1.0f - abs( dot( normal, -mcShadowLightDir.xyz ) ) ), 4.0f )
+		* vis * smoothstep( 0.62f, 0.96f, luma ) * 0.030f;
+
+	return lit + MC_TORCH_BLOOM * torchSeed + MC_SUN_BLOOM * ( sunSeed + grazing );
+}
+
+float3 faceSampleLocalPos( float3 localPos, float faceIndex )
+{
+	if ( faceIndex < 1.5f )
+	{
+		localPos.z += MC_LIGHT_FACE_EPS;
+	}
+	else if ( faceIndex < 2.5f )
+	{
+		localPos.z -= MC_LIGHT_FACE_EPS;
+	}
+	else if ( faceIndex < 3.5f )
+	{
+		localPos.x += MC_LIGHT_FACE_EPS;
+	}
+	else if ( faceIndex < 4.5f )
+	{
+		localPos.x -= MC_LIGHT_FACE_EPS;
+	}
+	else if ( faceIndex < 5.5f )
+	{
+		localPos.y += MC_LIGHT_FACE_EPS;
+	}
+	else
+	{
+		localPos.y -= MC_LIGHT_FACE_EPS;
+	}
+	return localPos;
+}
+
+float3 faceNormalForIndex( float faceIndex )
+{
+	// Chunks are axis-aligned (translation-only model matrix), so the local
+	// face normal is also the world normal. Mapping mirrors faceSampleLocalPos.
+	float3 normal = float3( 0.0f, 0.0f, 1.0f );
+	if ( faceIndex < 1.5f )
+	{
+		normal = float3( 0.0f, 0.0f, 1.0f );
+	}
+	else if ( faceIndex < 2.5f )
+	{
+		normal = float3( 0.0f, 0.0f, -1.0f );
+	}
+	else if ( faceIndex < 3.5f )
+	{
+		normal = float3( 1.0f, 0.0f, 0.0f );
+	}
+	else if ( faceIndex < 4.5f )
+	{
+		normal = float3( -1.0f, 0.0f, 0.0f );
+	}
+	else if ( faceIndex < 5.5f )
+	{
+		normal = float3( 0.0f, 1.0f, 0.0f );
+	}
+	else
+	{
+		normal = float3( 0.0f, -1.0f, 0.0f );
+	}
+	return normal;
+}
+
+float3 clampLightCell( float3 cell )
+{
+	cell = cell + MC_LIGHT_PAD;
+	cell.x = clamp( cell.x, 0.0f, MC_LIGHT_GRID_XY - 1.0f );
+	cell.y = clamp( cell.y, 0.0f, MC_LIGHT_GRID_XY - 1.0f );
+	cell.z = clamp( cell.z, 0.0f, MC_LIGHT_GRID_Z - 1.0f );
+	return cell;
+}
+
+float2 chunkLightUVFromCell( float3 cell )
+{
+	cell = clampLightCell( floor( cell ) );
+	float index = cell.x + cell.y * MC_LIGHT_GRID_XY + cell.z * MC_LIGHT_GRID_XY * MC_LIGHT_GRID_XY;
+	float row = floor( index / MC_LIGHT_TILE );
+	float col = index - row * MC_LIGHT_TILE;
+	return ( g_lightTileOrigin + float2( col + 0.5f, row + 0.5f ) ) / MC_LIGHT_ATLAS_SIZE;
+}
+
+float3 sampleLightCell( float3 cell )
+{
+	return saturate( tex2D( ChunkLightSampler, chunkLightUVFromCell( cell ) ).rgb );
+}
+
+float3 sampleCornerAverageLight( float3 baseCell, float3 axisA, float3 axisB, float cornerA, float cornerB )
+{
+	float3 firstCell = baseCell - axisA * ( 1.0f - cornerA ) - axisB * ( 1.0f - cornerB );
+	float3 light = sampleLightCell( firstCell );
+	light += sampleLightCell( firstCell + axisA );
+	light += sampleLightCell( firstCell + axisB );
+	light += sampleLightCell( firstCell + axisA + axisB );
+	return light * 0.25f;
+}
+
+float3 sampleSmoothFaceLight( float3 localPos, float faceIndex )
+{
+	float3 samplePos = faceSampleLocalPos( localPos, faceIndex );
+	float3 normalCell = floor( samplePos / MC_BLOCK_SIZE );
+	float3 blockPos = localPos / MC_BLOCK_SIZE;
+	float2 blend = frac( blockPos.xz );
+	float3 axisA = float3( 1.0f, 0.0f, 0.0f );
+	float3 axisB = float3( 0.0f, 0.0f, 1.0f );
+
+	if ( faceIndex < 2.5f )
+	{
+		blend = frac( blockPos.xy );
+		axisA = float3( 1.0f, 0.0f, 0.0f );
+		axisB = float3( 0.0f, 1.0f, 0.0f );
+	}
+	else if ( faceIndex < 4.5f )
+	{
+		blend = frac( blockPos.yz );
+		axisA = float3( 0.0f, 1.0f, 0.0f );
+		axisB = float3( 0.0f, 0.0f, 1.0f );
+	}
+
+	float3 corner00 = sampleCornerAverageLight( normalCell, axisA, axisB, 0.0f, 0.0f );
+	float3 corner10 = sampleCornerAverageLight( normalCell, axisA, axisB, 1.0f, 0.0f );
+	float3 corner01 = sampleCornerAverageLight( normalCell, axisA, axisB, 0.0f, 1.0f );
+	float3 corner11 = sampleCornerAverageLight( normalCell, axisA, axisB, 1.0f, 1.0f );
+	float3 light0 = lerp( corner00, corner10, blend.x );
+	float3 light1 = lerp( corner01, corner11, blend.x );
+	return lerp( light0, light1, blend.y );
+}
+
+float3 faceScaleForIndex( float faceIndex )
+{
+	float3 scale = float3( 0.8f, 0.8f, 0.8f );
+	if ( faceIndex < 1.5f )
+	{
+		scale = float3( 1.0f, 1.0f, 1.0f );
+	}
+	else if ( faceIndex < 2.5f )
+	{
+		scale = float3( 0.5f, 0.5f, 0.5f );
+	}
+	else if ( faceIndex < 3.5f )
+	{
+		scale = float3( 0.6f, 0.6f, 0.6f );
+	}
+	else if ( faceIndex < 4.5f )
+	{
+		scale = float3( 0.6f, 0.6f, 0.6f );
+	}
+	else if ( faceIndex < 5.5f )
+	{
+		scale = float3( 0.8f, 0.8f, 0.8f );
+	}
+	return scale;
+}
+
+float2 globalLightmapUV( float blockLight, float skyLight )
+{
+	return float2(
+		( blockLight + 0.5f ) / MC_GLOBAL_LIGHTMAP_SIZE,
+		( skyLight + 0.5f ) / MC_GLOBAL_LIGHTMAP_SIZE
+	);
+}
+
+float3 sampleGlobalLightmapLevel( float blockLevel, float skyLevel )
+{
+	return tex2D( GlobalLightmapSampler, globalLightmapUV( blockLevel, skyLevel ) ).rgb;
+}
+
+float3 composeGlobalLightmap( float3 lightChannels )
+{
+	float blockLight = saturate( lightChannels.g );
+	float skyLight = saturate( lightChannels.b );
+	float2 level = saturate( float2( blockLight, skyLight ) ) * ( MC_GLOBAL_LIGHTMAP_SIZE - 1.0f );
+	float2 level0 = floor( level );
+	float2 level1 = min( level0 + 1.0f, MC_GLOBAL_LIGHTMAP_SIZE - 1.0f );
+	float2 blend = level - level0;
+	float3 c00 = sampleGlobalLightmapLevel( level0.x, level0.y );
+	float3 c10 = sampleGlobalLightmapLevel( level1.x, level0.y );
+	float3 c01 = sampleGlobalLightmapLevel( level0.x, level1.y );
+	float3 c11 = sampleGlobalLightmapLevel( level1.x, level1.y );
+	float3 c0 = lerp( c00, c10, blend.x );
+	float3 c1 = lerp( c01, c11, blend.x );
+	float3 color = saturate( lerp( c0, c1, blend.y ) );
+	if ( color.r + color.g + color.b <= 0.001f )
+	{
+		float fallback = max( blockLight, skyLight );
+		color = float3( fallback, fallback, fallback );
+	}
+	return color;
+}
+
+float screenShadowVisibility( float4 clipPos )
+{
+	if ( mcShadowParams.z < 0.5f || mcShadowParams.x <= 0.0f )
+	{
+		return 1.0f;
+	}
+	if ( abs( clipPos.w ) < 0.0001f )
+	{
+		return 1.0f;
+	}
+
+	float2 uv = clipPos.xy / clipPos.w;
+	uv = float2( uv.x * 0.5f + 0.5f, 0.5f - uv.y * 0.5f );
+	float inside = step( 0.0f, uv.x ) * step( uv.x, 1.0f )
+		* step( 0.0f, uv.y ) * step( uv.y, 1.0f );
+	float rawShadow = saturate( tex2D( ShadowMapSampler, uv ).r );
+	float contrast = max( mcShadowParams.y, 1.0f );
+	float visibility = saturate( 1.0f - ( 1.0f - rawShadow ) * contrast );
+	visibility = lerp( 1.0f, visibility, inside );
+	return lerp( 1.0f, visibility, saturate( mcShadowParams.x ) );
+}
+
+float combinedShadowVisibility( float3 worldPos )
+{
+	if ( mcShadowParams.z < 0.5f || mcShadowParams.x <= 0.0f )
+	{
+		return 1.0f;
+	}
+
+	// mul(matrix, vector): with the transposed matrix uploaded from Lua this
+	// evaluates dot(worldPos, uploaded row j) per component — the exact scalar
+	// expansion csm_gshader_ps30 compiles to. mul(vector, matrix) would apply
+	// the transpose instead AND let the compiler drop register c13 (the engine
+	// still uploads c11..c14 as a block, so a literal placed at c13 would be
+	// clobbered at runtime).
+	float4 shadowPos = mul( viewprojmat, float4( worldPos, 1.0f ) );
+	if ( abs( shadowPos.w ) < 0.0001f )
+	{
+		return 1.0f;
+	}
+	float invW = 1.0f / abs( shadowPos.w );
+	float3 projected = shadowPos.xyz * invW;
+	float2 uv = float2( 0.5f + projected.x * 0.5f, 0.5f - projected.y * 0.5f );
+	uv.y = uv.y * max( mcShadowParams.w, 0.25f );
+
+	float inside = step( 0.0f, uv.x ) * step( uv.x, 1.0f )
+		* step( 0.0f, uv.y ) * step( uv.y, 1.0f );
+	float rawShadow = saturate( tex2D( ShadowMapSampler, uv ).r + mcShadowParams.y );
+	float visibility = lerp( 1.0f, rawShadow, inside );
+	return lerp( 1.0f, visibility, saturate( mcShadowParams.x ) );
+}
+
+// Shadow techniques sharing this sampling code (selected by mcShadowParams.w):
+//   -3 = Photon-style distorted single map (mc_shadow_mode "map")
+//   -2 = 3-cascade vertically stacked atlas (mc_shadow_mode "csm")
+// Number of cascade tiles stacked vertically in the cascade atlas. Tile k
+// occupies atlas v in [k/3, (k+1)/3); every tile spans the full atlas width.
+static const float MC_CSM_TILES = 3.0f;
+// Photon-style radial distortion: f = MIN + DISTORT * |clip.xy|; clip.xy /= f.
+// MUST match mc_gpu_shadow_depth_distort_vs30.fxc, which warps caster clip
+// positions identically. Magnifies the window center so the single map's
+// resolution falls off CONTINUOUSLY with camera distance — no cascade seams
+// to pop while the player moves.
+static const float MC_SHADOW_DISTORT = 0.85f;
+static const float MC_SHADOW_DISTORT_MIN = 1.0f - MC_SHADOW_DISTORT;
+
+float mcShadowSampleLit( float2 tileUV, float vScale, float vOffset, float kernelUV, float refDepth )
+{
+	// Preserve the current softness-scaled half-kernel clamp. This is not a
+	// strict half-texel isolation guard when kernelUV is below 1/mapSize, but it
+	// is retained here to avoid changing the shipped shadow edge behaviour.
+	// vScale/vOffset map tile-local v onto the atlas: (1/3, k/3) for the cascade
+	// atlas, (1, 0) for the single map.
+	float2 clamped = clamp( tileUV, 0.5f * kernelUV, 1.0f - 0.5f * kernelUV );
+	float2 atlasUV = float2( clamped.x, vOffset + clamped.y * vScale );
+	float shadowDepth = tex2Dlod( ShadowMapSampler, float4( atlasUV, 0.0f, 0.0f ) ).r;
+	return step( refDepth - mcShadowParams.y, shadowDepth );
+}
+
+// Interleaved gradient noise for rotation dither; feed it *screen* pixel
+// coordinates (VPOS), not shadow-map UVs.
+float interleavedGradientNoise( float2 pixelPos )
+{
+	float3 magic = float3( 0.06711056f, 0.00583715f, 52.9829189f );
+	return frac( magic.z * frac( dot( pixelPos, magic.xy ) ) );
+}
+
+// normal is a DEPRECATED/UNUSED parameter retained for source compatibility.
+float mcShadowVisibility( float3 worldPos, float3 normal, float2 screenPos, float skyUnit )
+{
+	if ( mcShadowParams.z < 0.5f || mcShadowParams.x <= 0.0f )
+	{
+		return 1.0f;
+	}
+
+#if MC_LINEAR_SHADOW_DEBUG
+	float4 linearShadowPos = mul( viewprojmat, float4( worldPos, 1.0f ) );
+	if ( abs( linearShadowPos.w ) < 0.0001f ) return 1.0f;
+	float3 linearClip = linearShadowPos.xyz / linearShadowPos.w;
+	float2 linearUV = float2( 0.5f + linearClip.x * 0.5f, 0.5f - linearClip.y * 0.5f );
+	float linearRefDepth = dot( worldPos - mcShadowLightOrigin.xyz, mcShadowLightDir.xyz ) * mcShadowLightDir.w;
+	float linearInside = step( 0.0f, linearUV.x ) * step( linearUV.x, 1.0f )
+		* step( 0.0f, linearUV.y ) * step( linearUV.y, 1.0f )
+		* step( 0.0f, linearRefDepth ) * step( linearRefDepth, 1.0f );
+	float linearStoredDepth = tex2Dlod( ShadowMapSampler, float4( linearUV, 0.0f, 0.0f ) ).r;
+	return lerp( 1.0f, step( linearRefDepth, linearStoredDepth ), linearInside );
+#endif
+
+	// PCF radius in tile UV units.
+	float kernelUV = mcShadowLightOrigin.w;
+
+	// ONE projection with $viewprojmat (distort mode: the full-distance
+	// window; csm mode: the near cascade). See combinedShadowVisibility for
+	// why this is mul(matrix, vector).
+	float4 shadowPos = mul( viewprojmat, float4( worldPos, 1.0f ) );
+	if ( abs( shadowPos.w ) < 0.0001f )
+	{
+		return 1.0f;
+	}
+	float invW = 1.0f / shadowPos.w;
+	float2 clipNear = shadowPos.xy * invW;
+	// DEPRECATED: an older path used normal, mcCsmNearInfo and mcCsmParams.z to
+	// apply a normal-offset bias here. The current clean PCF path intentionally
+	// preserves the shipped behaviour and performs no normal-based UV or depth
+	// offset; those inputs currently have no effect.
+	float2 uv;
+	float vScale = 1.0f;
+	float vOffset = 0.0f;
+	float edgeInside = 1.0f;
+
+	if ( mcShadowParams.w < -2.5f )
+	{
+		// ---- Photon-style distorted single map ----
+		// The radial warp matches the shadow writer. mcCsmNearInfo/halfRadius
+		// below belong to the deprecated normal-offset-bias path and do not
+		// affect the current result.
+		float f = MC_SHADOW_DISTORT_MIN + MC_SHADOW_DISTORT * length( clipNear );
+		float halfRadius = mcCsmNearInfo.x * f; // DEPRECATED/UNUSED
+		float2 warped = clipNear / ( MC_SHADOW_DISTORT_MIN + MC_SHADOW_DISTORT * length( clipNear ) );
+		uv = float2( 0.5f + warped.x * 0.5f, 0.5f - warped.y * 0.5f );
+		float2 border = min( uv, 1.0f - uv );
+		edgeInside = saturate( min( border.x, border.y ) / max( mcCsmParams.y, 0.001f ) );
+	}
+	else
+	{
+		// ---- 3-cascade atlas ----
+		// Pick the finest cascade whose window still contains the receiver
+		// with enough pad for the PCF taps (mcCsmParams.x, set by Lua from the
+		// kernel size). The coarser cascades share the
+		// same camera basis, so their clip positions are exact affine remaps
+		// of the near one (see the c15..c18 table comment).
+		float2 uvNear = float2( 0.5f + clipNear.x * 0.5f, 0.5f - clipNear.y * 0.5f );
+		float2 clipMid = clipNear * mcCsmCascade1.x + mcCsmCascade1.yz;
+		float2 uvMid = float2( 0.5f + clipMid.x * 0.5f, 0.5f - clipMid.y * 0.5f );
+		float pad = mcCsmParams.x;
+		float borderNear = min( min( uvNear.x, 1.0f - uvNear.x ), min( uvNear.y, 1.0f - uvNear.y ) );
+		float borderMid = min( min( uvMid.x, 1.0f - uvMid.x ), min( uvMid.y, 1.0f - uvMid.y ) );
+
+		float tileIndex = 0.0f;
+		float clipScale = 1.0f;
+		float2 clipOffset = float2( 0.0f, 0.0f );
+		float halfRadius = mcCsmNearInfo.x; // DEPRECATED/UNUSED
+		if ( borderNear <= pad )
+		{
+			if ( borderMid > pad )
+			{
+				tileIndex = 1.0f;
+				clipScale = mcCsmCascade1.x;
+				clipOffset = mcCsmCascade1.yz;
+				halfRadius = mcCsmCascade1.w; // DEPRECATED/UNUSED
+			}
+			else
+			{
+				tileIndex = 2.0f;
+				clipScale = mcCsmCascade2.x;
+				clipOffset = mcCsmCascade2.yz;
+				halfRadius = mcCsmCascade2.w; // DEPRECATED/UNUSED
+			}
+		}
+
+		float2 clipBiased = clipNear * clipScale + clipOffset;
+		uv = float2( 0.5f + clipBiased.x * 0.5f, 0.5f - clipBiased.y * 0.5f );
+		vScale = 1.0f / MC_CSM_TILES;
+		vOffset = tileIndex / MC_CSM_TILES;
+
+		// Border fade applies only on the LAST cascade: the inner tiles hand
+		// over to a coarser cascade well before their border.
+		if ( tileIndex > 1.5f )
+		{
+			float2 border = min( uv, 1.0f - uv );
+			edgeInside = saturate( min( border.x, border.y ) / max( mcCsmParams.y, 0.001f ) );
+		}
+	}
+
+	// Reference depth: same normalized linear light-space depth the MC shadow
+	// depth pass writes into the R32F target (COLOR1). It is valid for every
+	// cascade tile (window centers move orthogonally to the light direction)
+	// and untouched by the xy distortion.
+	float refDepth = dot( worldPos - mcShadowLightOrigin.xyz, mcShadowLightDir.xyz ) * mcShadowLightDir.w;
+	float inside = edgeInside * step( 0.0f, refDepth ) * step( refDepth, 1.0f );
+
+	// Rotated Poisson disc PCF. The rotation dither runs on *screen* pixels:
+	// tying it to shadow UVs makes shadow-texel-sized splotches that swim
+	// whenever the day cycle moves the sun (the whole UV mapping shifts every
+	// frame); screen-anchored IGN reads as fine stable grain instead.
+	float rotation = interleavedGradientNoise( screenPos ) * MC_TAU;
+	float2 rot = float2( cos( rotation ), sin( rotation ) );
+
+	float lit = 0.0f;
+	[branch] if ( mcShadowParams.w < -2.5f )
+	{
+		for ( int i = 0; i < MC_SHADOW_PHOTON_SAMPLES; ++i )
+		{
+			float2 offset = mcRotateShadowTap( i, rot );
+			// Photon: offset in UNDISTORTED clip space, then warp every tap.
+			float2 tapClip = clipNear + offset * ( kernelUV * 2.0f );
+			float tapFactor = MC_SHADOW_DISTORT_MIN + MC_SHADOW_DISTORT * length( tapClip );
+			float2 tapWarped = tapClip / tapFactor;
+			float2 tapUV = float2( 0.5f + tapWarped.x * 0.5f, 0.5f - tapWarped.y * 0.5f );
+			lit += mcShadowSampleLit( tapUV, 1.0f, 0.0f, kernelUV, refDepth );
+		}
+		lit *= ( 1.0f / float( MC_SHADOW_PHOTON_SAMPLES ) );
+	}
+	else
+	{
+		for ( int i = 0; i < MC_SHADOW_CSM_SAMPLES; ++i )
+		{
+			float2 offset = mcRotateCsmShadowTap( i, rot );
+			lit += mcShadowSampleLit( uv + kernelUV * offset, vScale, vOffset, kernelUV, refDepth );
+		}
+		lit *= ( 1.0f / float( MC_SHADOW_CSM_SAMPLES ) );
+	}
+
+	// Photon's shadow-distance fade: INSIDE the shadow map's coverage the PCF
+	// result is authoritative — never override it (gating lit areas by sky
+	// light painted a second, misaligned shadow under overhangs). OUTSIDE the
+	// coverage (border fade / depth range) fall back to a lightmap-derived
+	// shadow: only cells seeing nearly full sky count as sunlit.
+	float fallbackLit = smoothstep( 13.5f / 15.0f, 14.5f / 15.0f, skyUnit );
+	float visibility = lerp( fallbackLit, lit, inside );
+	// Photon keeps the near shadow-map result authoritative. Shadow strength
+	// grades the shadow color below; it must not leak direct sun through a
+	// fully occluded sample (visibility == 0).
+	return visibility;
+}
+
+float csmShadowVisibility( float3 worldPos, float4 clipPos, float3 normal, float2 screenPos, float skyUnit )
+{
+	if ( mcShadowParams.w < -1.5f )
+	{
+		return mcShadowVisibility( worldPos, normal, screenPos, skyUnit );
+	}
+	if ( mcShadowParams.w < -0.5f )
+	{
+		return screenShadowVisibility( clipPos );
+	}
+	return combinedShadowVisibility( worldPos );
+}
+
+HALF4 main( PS_INPUT i, float faceSign : VFACE, float2 vScreenPos : VPOS ) : COLOR
+{
+	clip( faceSign );
+	// Translucent variant: NO alpha test — glass/water texels keep their real
+	// alpha and blend in the translucent pass. Fully transparent texels blend
+	// to nothing on their own.
+	// tex2Dlod (explicit LOD 0): anisotropic minification must never widen the
+	// atlas footprint past the 4px tile gutter into alpha=0 cells (edge fade).
+	float4 albedo = tex2Dlod( BaseTextureSampler, float4( i.vTexCoord, 0.0f, 0.0f ) );
+	albedo.rgb *= mcBlockTint( i.vColor.b );
+
+	float faceIndex = floor( i.vColor.g * 255.0f + 0.5f );
+	g_lightTileOrigin = chunkLightTileOrigin( i.vWorldPos, i.vLocalPos );
+	float3 lightChannels = sampleSmoothFaceLight( i.vLocalPos, faceIndex );
+	float blockUnit = saturate( lightChannels.g );
+	// Sky channel is the FLOODED voxel sky light (Minecraft semantics: 15
+	// above open sky, -1 per lateral block into interiors, 0 fully enclosed).
+	// It is the AMBIENT sky term; the shadow map below is the only
+	// directional shadow — no more competing sky-pillar shadow.
+	float skyUnit = saturate( lightChannels.b );
+
+	// Minecraft-shaderpack composition: split the lightmap into a torch term,
+	// an AMBIENT sky term (scales with local voxel sky light and darkens
+	// interiors) and a DIRECT sun term controlled only by the directional
+	// shadow result. Voxel sky light must not paint a second vertical shadow.
+	float3 torchCol = composeGlobalLightmap( float3( 0.0f, blockUnit, 0.0f ) );
+	float3 ambCol = max( composeGlobalLightmap( float3( 0.0f, blockUnit, skyUnit ) ) - torchCol, 0.0f );
+	float3 sunCol = max( composeGlobalLightmap( float3( 0.0f, blockUnit, 1.0f ) ) - torchCol, 0.0f );
+
+	// ONE directional shadow: raw shadow-map PCF plus sun-facing shading.
+	// mc_shadow_strength is retained only for color grading; blending raw PCF
+	// toward 1 leaked direct light into fully occluded interiors.
+	float3 normal = faceNormalForIndex( faceIndex );
+	float castVis = csmShadowVisibility( i.vWorldPos, i.vClipPos, normal, vScreenPos, skyUnit );
+	float strength = saturate( mcShadowParams.x );
+	float facing = smoothstep( 0.0f, 0.35f, dot( normal, -mcShadowLightDir.xyz ) );
+	float directionalVis = lerp( 1.0f, facing, saturate( mcShadowFancy.z ) );
+#if MC_LINEAR_SHADOW_DEBUG
+	directionalVis = 1.0f;
+#endif
+#if MC_SEPARATE_FACE_LIGHTING
+	float vis = castVis;
+#else
+	float vis = min( castVis, directionalVis );
+#endif
+
+	// Grade: cool shadows, warm sun, warm torch pools. Torch light is NEVER
+	// darkened by the sun shadow — it rides its own term.
+	float shadowAmount = ( 1.0f - vis ) * saturate( mcShadowFancy.x ) * strength;
+	float warmth = saturate( mcShadowFancy.w );
+	float3 skyGrade = lerp( float3( 1.0f, 1.0f, 1.0f ), MC_SHADOW_TINT, shadowAmount );
+	skyGrade *= lerp( float3( 1.0f, 1.0f, 1.0f ), MC_SUN_WARM, warmth * vis );
+	float3 torchGrade = lerp( float3( 1.0f, 1.0f, 1.0f ), MC_TORCH_WARM, warmth * blockUnit );
+
+	// Photon rule: near-range direct sun is controlled by directional shadow
+	// visibility, not by the voxel skylight used for ambient/cave lighting.
+	float3 lightColor = torchCol * torchGrade
+		+ ambCol * ( MC_SKY_AMBIENT_FRAC * skyGrade )
+		+ sunCol * ( ( 1.0f - MC_SKY_AMBIENT_FRAC ) * vis
+#if MC_SEPARATE_FACE_LIGHTING
+			* directionalVis
+#endif
+			* skyGrade );
+
+	float3 faceScale = faceScaleForIndex( faceIndex );
+	float aoMul = saturate( i.vColor.r );
+	// Night cool tint: r channel weight is ~0 in torch pools and caves, so
+	// only sky-lit night surfaces shift toward moonlight blue.
+	float nightW = saturate( lightChannels.r );
+	float3 nightTint = lerp( float3( 1.0f, 1.0f, 1.0f ), MC_NIGHT_TINT, nightW );
+	float3 lit = albedo.rgb * lightColor * faceScale * aoMul * nightTint;
+
+	// Match the opaque material's bloom seed before alpha blending; the real
+	// blur happens once, after opaque and translucent scene rendering finish.
+	lit = applyBloomSeed( lit, normal, blockUnit, vis, facing, warmth );
+
+	// Real alpha out: atlas texel alpha times the vertex shade alpha.
+	return HALF4( saturate( lit ), saturate( albedo.a * i.vColor.a ) );
+}

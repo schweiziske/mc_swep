@@ -1,0 +1,45 @@
+// STATIC: "X360APPCHOOSER" "0..1" [= 0]
+
+// MC shadow depth vertex shader, Photon-style distorted variant. Identical to
+// mc_gpu_shadow_depth_vs30 except the ortho clip position is warped radially:
+//   f = MIN + DISTORT * length(clip.xy);  clip.xy /= f
+// which magnifies the window center, concentrating most of the single shadow
+// map's texels near the camera so resolution falls off CONTINUOUSLY with
+// distance (Minecraft shaderpack "shadow distortion" — no cascade seams).
+// The receiving chunk shaders apply the SAME warp per pixel, so the constants
+// here must match their MC_SHADOW_DISTORT / MC_SHADOW_DISTORT_MIN.
+// Safe on this geometry: chunk faces are per-block quads (~36.5u), so the
+// linear interpolation across a warped triangle never visibly bends edges.
+// Only clip xy is warped; z and the linear world-space depth the pixel shader
+// writes from vWorldPos are untouched.
+
+#include "common_vs_fxc.h"
+
+static const float MC_SHADOW_DISTORT = 0.85f;
+static const float MC_SHADOW_DISTORT_MIN = 0.15f;
+
+struct VS_INPUT
+{
+	float4 vPos      : POSITION;
+	float2 vTexCoord : TEXCOORD0;
+};
+
+struct VS_OUTPUT
+{
+	float4 vProjPos  : POSITION;
+	float3 vWorldPos : TEXCOORD0;
+	float2 vTexCoord : TEXCOORD1;
+};
+
+VS_OUTPUT main( VS_INPUT v )
+{
+	VS_OUTPUT o = ( VS_OUTPUT )0;
+	float4 projPos = mul( v.vPos, cModelViewProj );
+	// Ortho sun camera: w == 1, so the warp can run on projPos.xy directly.
+	float f = MC_SHADOW_DISTORT_MIN + MC_SHADOW_DISTORT * length( projPos.xy );
+	projPos.xy /= f;
+	o.vProjPos = projPos;
+	o.vWorldPos = mul4x3( v.vPos, cModel[0] );
+	o.vTexCoord = v.vTexCoord;
+	return o;
+}

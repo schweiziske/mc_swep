@@ -62,6 +62,30 @@ MAX_NBT_DEPTH = 64
 MAX_NBT_COLLECTION_ITEMS = 1_048_576
 MAX_DECOMPRESSED_CHUNK_BYTES = 64 * 1024 * 1024
 
+# 坐标映射：MC x/-z/y -> GMod bx/by/bz（行列式 +1，不镜像）。
+# GMod 侧把 Source -Y 命名为 north（左手系命名），而 MC north 是 -Z（右手系），
+# 因此朴素的 x->x/z->y 交换必然镜像；负号落在 Z 轴上，代价是 MC 南北落到
+# GMod 的北南。下面的方向/轴/旋转表与该映射联动，且都必须保持对合
+# （应用两次等于恒等，见 phase5 测试的闭包断言）。
+IMPORT_DIRECTIONS = {
+    "north": "south",
+    "east": "east",
+    "south": "north",
+    "west": "west",
+}
+IMPORT_AXES = {"x": "x", "y": "y", "z": "z"}
+IMPORT_LEFT_RIGHT = {"left": "right", "right": "left"}
+IMPORT_LEFT_RIGHT_PROPERTIES = frozenset({"hinge", "type", "side_chain"})
+IMPORT_ROTATIONS = {str(value): str((8 - value) % 16) for value in range(16)}
+IMPORT_HORIZONTAL_PAIRS = {
+    frozenset(("north", "south")): "north_south",
+    frozenset(("east", "west")): "east_west",
+    frozenset(("north", "east")): "north_east",
+    frozenset(("north", "west")): "north_west",
+    frozenset(("south", "east")): "south_east",
+    frozenset(("south", "west")): "south_west",
+}
+
 
 class ImportValidationError(ValueError):
     def __init__(self, code: str, message: str, **context: Any) -> None:
@@ -258,11 +282,69 @@ def typed_nbt_value(value: Any, tag: int) -> dict[str, Any]:
     return {"tag": names[tag], "value": str(value) if tag == TAG_LONG else value}
 
 
+def transform_import_tokens(
+    value: str,
+    transform_left_right: bool = False,
+    canonical_horizontal_pair: bool = False,
+) -> str:
+    parts = value.split("_")
+    transformed = [IMPORT_DIRECTIONS.get(part, part) for part in parts]
+    if transform_left_right:
+        transformed = [IMPORT_LEFT_RIGHT.get(part, part) for part in transformed]
+    if canonical_horizontal_pair and len(transformed) == 2 and all(
+        part in IMPORT_DIRECTIONS for part in transformed
+    ):
+        return IMPORT_HORIZONTAL_PAIRS[frozenset(transformed)]
+    return "_".join(transformed)
+
+
+def transform_import_property_value(property_name: str, value: str) -> str:
+    if property_name == "rotation":
+        transformed = IMPORT_ROTATIONS.get(value)
+        if transformed is None:
+            raise ImportValidationError(
+                "unsupported_import_rotation",
+                f"cannot transform rotation={value!r} from Minecraft to GMod axes",
+                property=property_name,
+                value=value,
+            )
+        return transformed
+    if property_name == "axis":
+        return IMPORT_AXES.get(value, value)
+    if property_name in ("facing", "orientation"):
+        return transform_import_tokens(value)
+    if property_name == "shape":
+        return transform_import_tokens(value, transform_left_right=True, canonical_horizontal_pair=True)
+    if property_name in IMPORT_LEFT_RIGHT_PROPERTIES:
+        return IMPORT_LEFT_RIGHT.get(value, value)
+    return value
+
+
+def transform_import_block_state_entry(entry: Any) -> dict[str, Any]:
+    if not isinstance(entry, dict):
+        raise ImportValidationError("invalid_palette_entry", "block state palette entry is not a compound")
+    transformed: dict[str, Any] = {"Name": entry.get("Name")}
+    if "Properties" not in entry:
+        return transformed
+    raw_properties = entry.get("Properties")
+    if not isinstance(raw_properties, dict):
+        raise ImportValidationError("invalid_properties", "block state Properties is not a compound")
+    properties: dict[str, str] = {}
+    for property_name, value in raw_properties.items():
+        if not isinstance(property_name, str) or not isinstance(value, str):
+            raise ImportValidationError("invalid_property_type", "block state property names and values must be strings")
+        transformed_name = IMPORT_DIRECTIONS.get(property_name, property_name)
+        properties[transformed_name] = transform_import_property_value(property_name, value)
+    transformed["Properties"] = properties
+    return transformed
+
+
 class BlockStateRegistry:
     def __init__(self, report: dict[str, Any], metadata: dict[str, Any]) -> None:
         self.report = report
         self.metadata = metadata
         self.world_version = int(metadata["worldVersion"])
+        self.import_specs: dict[str, str] = {}
         self.schemas: dict[str, tuple[tuple[str, ...], dict[str, frozenset[str]], frozenset[tuple[str, ...]]]] = {}
         for name, definition in report.items():
             if not isinstance(definition, dict):
@@ -338,12 +420,18 @@ class BlockStateRegistry:
             f"{property_name}={raw_properties[property_name]}" for property_name in property_order
         ) + "]"
 
+    def import_spec(self, entry: Any) -> str:
+        source_spec = self.canonical_spec(entry)
+        cached = self.import_specs.get(source_spec)
+        if cached is not None:
+            return cached
+        transformed = self.canonical_spec(transform_import_block_state_entry(entry))
+        self.import_specs[source_spec] = transformed
+        return transformed
+
 
 def _generated_metadata(repo_root: pathlib.Path) -> dict[str, Any]:
-    metadata_path = repo_root / "lua" / "mc" / "generated" / "sh_generated_block_state_schemas.lua"
-    if not metadata_path.is_file():
-        metadata_path = pathlib.Path(__file__).resolve().parent / "data" / "sh_generated_block_state_schemas.lua"
-    text = metadata_path.read_text(encoding="utf-8")
+    text = (repo_root / "lua" / "mc" / "generated" / "sh_generated_block_state_schemas.lua").read_text(encoding="utf-8")
     fields: dict[str, Any] = {}
     for key in ("minecraftId", "seriesId", "schemaHash", "reportSha256"):
         match = re.search(rf'{key}="([^"]+)"', text)
@@ -359,10 +447,7 @@ def _generated_metadata(repo_root: pathlib.Path) -> dict[str, Any]:
 
 def load_block_state_registry(repo_root: pathlib.Path | None = None) -> BlockStateRegistry:
     root = repo_root or pathlib.Path(__file__).resolve().parents[1]
-    report_path = root / "generated" / "reports" / "blocks.json"
-    if not report_path.is_file():
-        report_path = pathlib.Path(__file__).resolve().parent / "data" / "blocks.json"
-    report = json.loads(report_path.read_text(encoding="utf-8"))
+    report = json.loads((root / "generated" / "reports" / "blocks.json").read_text(encoding="utf-8"))
     return BlockStateRegistry(report, _generated_metadata(root))
 
 
@@ -695,6 +780,7 @@ def opaque_block_entity_record(
     entry: Any,
     data_version: int,
     lo: tuple[int, int, int],
+    hi: tuple[int, int, int],
     origin: tuple[int, int, int],
     keep_coords: bool,
 ) -> tuple[tuple[int, int, int], dict[str, Any], dict[str, Any]]:
@@ -710,7 +796,7 @@ def opaque_block_entity_record(
             raise ImportValidationError("invalid_block_entity_position", f"block entity {type_name} has invalid {key}")
         coords.append(value)
     x, y, z = coords
-    bx, by, bz = dest_pos(x, y, z, lo, origin, keep_coords)
+    bx, by, bz = dest_pos(x, y, z, lo, hi, origin, keep_coords)
     cx, cy, cz = floor_div(bx, CS), floor_div(by, CS), floor_div(bz, CH)
     lx, ly, lz = bx - cx * CS, by - cy * CS, bz - cz * CH
     local_index = lx + ly * CS + lz * CS2
@@ -820,12 +906,14 @@ def dest_pos(
     y: int,
     z: int,
     lo: tuple[int, int, int],
+    hi: tuple[int, int, int],
     origin: tuple[int, int, int],
     keep_coords: bool,
 ) -> tuple[int, int, int]:
     if keep_coords:
-        return x + origin[0], z + origin[1], y + origin[2]
-    return x - lo[0] + origin[0], z - lo[2] + origin[1], y - lo[1] + origin[2]
+        return x + origin[0], -z + origin[1], y + origin[2]
+    # by 以 hi[2] 为基准，使负向的 -z 轴仍从 origin 开始正向延伸。
+    return x - lo[0] + origin[0], hi[2] - z + origin[1], y - lo[1] + origin[2]
 
 
 def add_output_block(
@@ -944,7 +1032,7 @@ def import_world(args: argparse.Namespace, registry: BlockStateRegistry | None =
                         if not pal_data:
                             continue
                         palette, packed = pal_data
-                        canonical_palette = [registry.canonical_spec(entry) for entry in palette]
+                        canonical_palette = [registry.import_spec(entry) for entry in palette]
                         indices = unpack_palette_indices(packed, len(palette))
                         for i, pi in enumerate(indices):
                             spec = canonical_palette[pi]
@@ -959,7 +1047,7 @@ def import_world(args: argparse.Namespace, registry: BlockStateRegistry | None =
                             z = cz * 16 + lz
                             if not in_box(x, y, z, lo, hi):
                                 continue
-                            bx, by, bz = dest_pos(x, y, z, lo, origin, args.keep_coords)
+                            bx, by, bz = dest_pos(x, y, z, lo, hi, origin, args.keep_coords)
                             if not add_output_state(chunks, out_palette, out_palette_index, bx, by, bz, spec):
                                 continue
                             unique[name] = unique.get(name, 0) + 1
@@ -982,7 +1070,7 @@ def import_world(args: argparse.Namespace, registry: BlockStateRegistry | None =
                         if not in_box(x, y, z, lo, hi):
                             continue
                         out_key, record, event = opaque_block_entity_record(
-                            block_entity, data_version, lo, origin, args.keep_coords,
+                            block_entity, data_version, lo, hi, origin, args.keep_coords,
                         )
                         opaque_entities.setdefault(out_key, []).append(record)
                         loss_events.append(event)
@@ -1038,6 +1126,7 @@ def make_output(
         "to": list(args.to_pos),
         "origin": list(args.origin),
         "keepCoords": bool(args.keep_coords),
+        "axisMapping": "minecraft x/-z/y -> gmod bx/by/bz",
         "maxBlocks": int(args.max_blocks or 0),
         "observedDataVersions": observed_versions,
     }
@@ -1594,7 +1683,7 @@ def iter_gmod_save_chunks_from_world(
                         if not pal_data:
                             continue
                         source_palette, packed = pal_data
-                        canonical_palette = [registry.canonical_spec(entry) for entry in source_palette]
+                        canonical_palette = [registry.import_spec(entry) for entry in source_palette]
                         indices = unpack_palette_indices(packed, len(source_palette))
                         for i, pi in enumerate(indices):
                             spec = canonical_palette[pi]
@@ -1609,7 +1698,7 @@ def iter_gmod_save_chunks_from_world(
                             z = cz * 16 + lz
                             if not in_box(x, y, z, lo, hi):
                                 continue
-                            bx, by, bz = dest_pos(x, y, z, lo, origin, args.keep_coords)
+                            bx, by, bz = dest_pos(x, y, z, lo, hi, origin, args.keep_coords)
                             add_output_state(chunks, palette, palette_index, bx, by, bz, spec)
                             unique.add(name)
                             stats["blocks"] += 1
@@ -1631,7 +1720,7 @@ def iter_gmod_save_chunks_from_world(
                         if not in_box(x, y, z, lo, hi):
                             continue
                         out_key, record, event = opaque_block_entity_record(
-                            block_entity, data_version, lo, origin, args.keep_coords,
+                            block_entity, data_version, lo, hi, origin, args.keep_coords,
                         )
                         opaque_entities.setdefault(out_key, []).append(record)
                         stats.setdefault("_lossEvents", []).append(event)
@@ -1713,6 +1802,7 @@ def stream_world_to_gmod_save(
             "to": list(args.to_pos),
             "origin": list(args.origin),
             "keepCoords": bool(args.keep_coords),
+            "axisMapping": "minecraft x/-z/y -> gmod bx/by/bz",
             "maxBlocks": int(args.max_blocks or 0),
             "streamed": True,
         },
@@ -1809,27 +1899,27 @@ def default_gmod_map() -> str:
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Convert a Minecraft Java Anvil world area into GMod MC import data")
-    p.add_argument("--world", required=True, help="Minecraft Java world directory, for example C:\\Users\\Name\\.minecraft\\saves\\World")
-    p.add_argument("--dimension", default="overworld", help="Dimension: overworld, the_nether, or the_end (default: overworld)")
-    p.add_argument("--out", help="Output import JSON; defaults to garrysmod/data/mc_import/<world>.json")
-    p.add_argument("--from", dest="from_pos", nargs=3, type=int, metavar=("X", "Y", "Z"), help="Inclusive first Minecraft block coordinate")
-    p.add_argument("--to", dest="to_pos", nargs=3, type=int, metavar=("X", "Y", "Z"), help="Inclusive last Minecraft block coordinate")
-    p.add_argument("--from-chunk", nargs=2, type=int, metavar=("CX", "CZ"), help="Inclusive first Minecraft chunk coordinate")
-    p.add_argument("--to-chunk", nargs=2, type=int, metavar=("CX", "CZ"), help="Inclusive last Minecraft chunk coordinate")
-    p.add_argument("--y-range", nargs=2, type=int, default=(-64, 319), metavar=("MINY", "MAXY"), help="Minecraft Y range for chunk selection (default: -64 319)")
-    p.add_argument("--origin", nargs=3, type=int, default=(0, 0, DEFAULT_ORIGIN_Z), metavar=("BX", "BY", "BZ"), help="Destination GMod block origin (default: 0 0 0)")
-    p.add_argument("--keep-coords", action="store_true", help="Retain Minecraft coordinates and apply origin as an offset")
-    p.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS, help="Maximum exported non-air blocks; 0 means unlimited")
-    p.add_argument("--allow-data-version", action="append", type=int, default=[], help="Explicitly allow a schema-validated source DataVersion; may be repeated")
+    p = argparse.ArgumentParser(description="Export a Java Edition Minecraft world region to GMod MC import JSON")
+    p.add_argument("--world", required=True, help="Java world-save directory, e.g. E:\\mc\\.minecraft\\saves\\World")
+    p.add_argument("--dimension", default="overworld", help="Dimension: overworld/the_nether/the_end (default: overworld)")
+    p.add_argument("--out", help="Output JSON path (default: garrysmod/data/mc_import/<world-name>.json)")
+    p.add_argument("--from", dest="from_pos", nargs=3, type=int, metavar=("X", "Y", "Z"), help="Starting MC coordinates")
+    p.add_argument("--to", dest="to_pos", nargs=3, type=int, metavar=("X", "Y", "Z"), help="Ending MC coordinates")
+    p.add_argument("--from-chunk", nargs=2, type=int, metavar=("CX", "CZ"), help="Starting MC chunk coordinates (inclusive)")
+    p.add_argument("--to-chunk", nargs=2, type=int, metavar=("CX", "CZ"), help="Ending MC chunk coordinates (inclusive)")
+    p.add_argument("--y-range", nargs=2, type=int, default=(-64, 319), metavar=("MINY", "MAXY"), help="MC Y range to use with chunk coordinates (default: -64..319)")
+    p.add_argument("--origin", nargs=3, type=int, default=(0, 0, DEFAULT_ORIGIN_Z), metavar=("BX", "BY", "BZ"), help="GMod import origin (default: 0 0 0)")
+    p.add_argument("--keep-coords", action="store_true", help="Keep MC x/-z/y as GMod bx/by/bz instead of offsetting them to origin")
+    p.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS, help="Maximum number of blocks to export offline; 0 means unlimited")
+    p.add_argument("--allow-data-version", action="append", type=int, default=[], help="Explicitly allow source DataVersions that pass full schema validation; repeatable, default accepts only the target version")
     p.add_argument("--split-chunks", action=argparse.BooleanOptionalAction, default=True, help="write one small JSON per GMod chunk plus a manifest")
-    p.add_argument("--save-name", help="Also create data/mc/saves/<name>.dat for the save manager")
-    p.add_argument("--save-out", help="GMod save .dat output path; matching JSON metadata is also written")
-    p.add_argument("--save-map", help="GMod map stored in save metadata; defaults to an existing map or gm_flatgrass")
-    p.add_argument("--block-size", type=float, default=BS, help="Saved MC.BS block size (default: 36.5)")
-    p.add_argument("--saved-at", type=int, help="Saved Unix timestamp (default: current time)")
+    p.add_argument("--save-name", help="Also write data/mc/saves/<name>.dat for mc_save_manager to read")
+    p.add_argument("--save-out", help="Output path for the GMod save .dat; also writes same-named .json metadata")
+    p.add_argument("--save-map", help="GMod map name written to save metadata; defaults to the map name in an existing data/mc/*.dat or gm_flatgrass")
+    p.add_argument("--block-size", type=float, default=BS, help="MC.BS value written to the save (default: 36.5)")
+    p.add_argument("--saved-at", type=int, help="Unix timestamp written to the save (default: current time)")
     p.add_argument("--save-format", choices=("auto", "classic", "chunked", "streaming"), default="auto", help="GMod save format: auto/classic/chunked/streaming")
-    p.add_argument("--save-part-json-bytes", type=int, default=DEFAULT_SAVE_PART_JSON_BYTES, help="Target uncompressed JSON bytes per save part (default: 4 MiB)")
+    p.add_argument("--save-part-json-bytes", type=int, default=DEFAULT_SAVE_PART_JSON_BYTES, help="Target maximum uncompressed JSON size per sharded save part (default: 4 MiB)")
     args = p.parse_args(argv)
 
     if args.from_chunk or args.to_chunk:

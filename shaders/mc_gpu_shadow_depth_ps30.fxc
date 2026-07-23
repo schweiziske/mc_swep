@@ -1,0 +1,45 @@
+// MC shadow depth writer. The shadow pass binds a throwaway target at MRT
+// slot 0 and the real R32F shadow map at MRT slot 1 (same layout as the CSM
+// addon's shadowmap_writedepth shaders), so the depth MUST go to COLOR1:
+// COLOR0 lands in the dummy target and is discarded.
+//
+// Depth convention: normalized linear light-space depth
+//   depth = dot(worldPos - lightOrigin, lightForward) / zfar
+// The chunk shader recomputes the exact same value from its own world
+// position, so no engine projection convention is involved in the compare.
+//
+// The runtime submits only opaque/cutout chunk meshes to this pass. Their
+// atlas texels are alpha-tested at 0.5, so torch cross quads and leaves cast
+// only through opaque texels. Translucent glass/water meshes are not submitted
+// to this depth shader and therefore do not cast through this path.
+
+sampler BaseTextureSampler : register( s0 );
+
+float4 mcShadowLightDir    : register( c0 ); // xyz: light forward, w: 1/zfar ($c0_*)
+float4 mcShadowLightOrigin : register( c1 ); // xyz: shadow camera origin ($c1_*)
+
+struct PS_INPUT
+{
+	float3 vWorldPos : TEXCOORD0;
+	float2 vTexCoord : TEXCOORD1;
+};
+
+struct PS_OUTPUT
+{
+	float4 dummy : COLOR0;
+	float4 depth : COLOR1;
+};
+
+PS_OUTPUT main( PS_INPUT i )
+{
+	// tex2Dlod (explicit LOD 0): anisotropic minification must never widen the
+	// atlas footprint past the 4px tile gutter into alpha=0 cells (caster holes).
+	float alpha = tex2Dlod( BaseTextureSampler, float4( i.vTexCoord, 0.0f, 0.0f ) ).a;
+	clip( alpha - 0.5f );
+
+	PS_OUTPUT o;
+	float depth = saturate( dot( i.vWorldPos - mcShadowLightOrigin.xyz, mcShadowLightDir.xyz ) * mcShadowLightDir.w );
+	o.dummy = float4( 0.0f, 0.0f, 0.0f, 1.0f );
+	o.depth = float4( depth, depth, depth, 1.0f );
+	return o;
+}
