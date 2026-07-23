@@ -430,8 +430,28 @@ class BlockStateRegistry:
         return transformed
 
 
+def _generated_asset_path(repo_root: pathlib.Path, filename: str, primary: pathlib.Path) -> pathlib.Path:
+    """Resolve generated assets from either the full tree or the published tools bundle."""
+    candidates = (
+        repo_root / primary,
+        repo_root / "tools" / "data" / filename,
+        repo_root / "_tools" / "data" / filename,
+        pathlib.Path(__file__).resolve().parent / "data" / filename,
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return candidate
+    searched = ", ".join(str(candidate) for candidate in candidates)
+    raise FileNotFoundError(f"generated asset {filename!r} not found; searched: {searched}")
+
+
 def _generated_metadata(repo_root: pathlib.Path) -> dict[str, Any]:
-    text = (repo_root / "lua" / "mc" / "generated" / "sh_generated_block_state_schemas.lua").read_text(encoding="utf-8")
+    metadata_path = _generated_asset_path(
+        repo_root,
+        "sh_generated_block_state_schemas.lua",
+        pathlib.Path("lua") / "mc" / "generated" / "sh_generated_block_state_schemas.lua",
+    )
+    text = metadata_path.read_text(encoding="utf-8")
     fields: dict[str, Any] = {}
     for key in ("minecraftId", "seriesId", "schemaHash", "reportSha256"):
         match = re.search(rf'{key}="([^"]+)"', text)
@@ -447,7 +467,12 @@ def _generated_metadata(repo_root: pathlib.Path) -> dict[str, Any]:
 
 def load_block_state_registry(repo_root: pathlib.Path | None = None) -> BlockStateRegistry:
     root = repo_root or pathlib.Path(__file__).resolve().parents[1]
-    report = json.loads((root / "generated" / "reports" / "blocks.json").read_text(encoding="utf-8"))
+    report_path = _generated_asset_path(
+        root,
+        "blocks.json",
+        pathlib.Path("generated") / "reports" / "blocks.json",
+    )
+    report = json.loads(report_path.read_text(encoding="utf-8"))
     return BlockStateRegistry(report, _generated_metadata(root))
 
 
