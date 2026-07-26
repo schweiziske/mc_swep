@@ -560,6 +560,11 @@ namespace mcmesh::meshbuild {
         return ws::GetSkyLightChunk(LUA);
     }
 
+    int GetLightingHalo(ILuaBase* LUA) {
+        if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushNil(); return 1; }
+        return ws::GetLightingHalo(LUA);
+    }
+
     int StartBlockLightRebuild(ILuaBase* LUA) {
         if (g_promise.SS<=0 || g_faulted || !blockdefs::Seal()) { LUA->PushBool(false); return 1; }
         return ws::StartBlockLightRebuild(LUA);

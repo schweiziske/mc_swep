@@ -175,6 +175,7 @@ namespace mcmesh::worldstate {
     int RebuildBlockLight(ILuaBase* LUA);
     int GetBlockLightChunk(ILuaBase* LUA);
     int GetSkyLightChunk(ILuaBase* LUA);
+    int GetLightingHalo(ILuaBase* LUA);
     int StartBlockLightRebuild(ILuaBase* LUA);
     int PollBlockLightRebuild(ILuaBase* LUA);
     void StopBlockLightWorker();

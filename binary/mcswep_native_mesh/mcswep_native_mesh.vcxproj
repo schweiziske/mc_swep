@@ -99,27 +99,27 @@
   </ImportGroup>
   <PropertyGroup Label="UserMacros" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|x64'">
-    <OutDir>G:\SteamLibrary\steamapps\common\GarrysMod\garrysmod\lua\bin</OutDir>
+    <OutDir>$(ProjectDir)</OutDir>
     <TargetName>gmcl_mcswep_native_mesh_win64</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|x64'">
-    <OutDir>G:\SteamLibrary\steamapps\common\GarrysMod\garrysmod\lua\bin</OutDir>
+    <OutDir>$(ProjectDir)</OutDir>
     <TargetName>gmcl_mcswep_native_mesh_win64</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Final|x64'">
-    <OutDir>G:\SteamLibrary\steamapps\common\GarrysMod\garrysmod\lua\bin</OutDir>
+    <OutDir>$(ProjectDir)</OutDir>
     <TargetName>gmcl_mcswep_native_mesh_win64</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
-    <OutDir>G:\SteamLibrary\steamapps\common\GarrysMod\garrysmod\lua\bin</OutDir>
+    <OutDir>$(ProjectDir)</OutDir>
     <TargetName>gmcl_mcswep_native_mesh_win32</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release|Win32'">
-    <OutDir>G:\SteamLibrary\steamapps\common\GarrysMod\garrysmod\lua\bin</OutDir>
+    <OutDir>$(ProjectDir)</OutDir>
     <TargetName>gmcl_mcswep_native_mesh_win32</TargetName>
   </PropertyGroup>
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Release_Final|Win32'">
-    <OutDir>G:\SteamLibrary\steamapps\common\GarrysMod\garrysmod\lua\bin</OutDir>
+    <OutDir>$(ProjectDir)</OutDir>
     <TargetName>gmcl_mcswep_native_mesh_win32</TargetName>
   </PropertyGroup>
   <ItemDefinitionGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'">
@@ -150,13 +150,13 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC32;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include</AdditionalIncludeDirectories>
-      <Optimization>Disabled</Optimization>
-      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <Optimization>MaxSpeed</Optimization>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -176,7 +176,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC32;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
@@ -199,7 +199,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC64;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include\garrysmod_common\include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
@@ -221,14 +221,14 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC64;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
       <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include</AdditionalIncludeDirectories>
-      <Optimization>Disabled</Optimization>
+      <Optimization>MaxSpeed</Optimization>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <WholeProgramOptimization>false</WholeProgramOptimization>
+      <WholeProgramOptimization>true</WholeProgramOptimization>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -248,7 +248,7 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC64;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Create</PrecompiledHeader>
+      <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
@@ -268,6 +268,9 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
+    <ClCompile Include="pch.cpp">
+      <PrecompiledHeader>Create</PrecompiledHeader>
+    </ClCompile>
     <ClCompile Include="blockdefs.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="emitters.cpp" />

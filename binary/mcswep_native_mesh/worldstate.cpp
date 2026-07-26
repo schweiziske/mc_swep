@@ -583,6 +583,42 @@ namespace mcmesh::worldstate {
         LUA->PushString(reinterpret_cast<const char*>(it->second->skyLight),(unsigned int)sizeof(it->second->skyLight));return 1;
     }
 
+    int GetLightingHalo(ILuaBase* LUA) {
+        int cx=0,cy=0,cz=0;if(!ReadChunkCoords(LUA,cx,cy,cz)){LUA->PushNil();return 1;}
+        const int CS=g_promise.CS,CH=g_promise.CH;
+        if(CS<=0||CH<=0){LUA->PushNil();return 1;}
+        const int GX=CS+2,GZ=CH+2;
+        ChunkMirror* mirrors[27]={};
+        for(int dz=-1;dz<=1;++dz)for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx){
+            const auto it=g_world.find(PackChunkKey(cx+dx,cy+dy,cz+dz));
+            mirrors[(dx+1)+(dy+1)*3+(dz+1)*9]=(it==g_world.end())?nullptr:it->second.get();
+        }
+        static std::vector<uint8_t> buffer;
+        buffer.resize(size_t(GX)*GX*GZ*2);
+        size_t o=0;
+        for(int lz=-1;lz<=CH;++lz){
+            const int dz=lz<0?-1:(lz>=CH?1:0);const int nlz=lz-dz*CH;
+            for(int ly=-1;ly<=CS;++ly){
+                const int dy=ly<0?-1:(ly>=CS?1:0);const int nly=ly-dy*CS;
+                const int mBase=(dy+1)*3+(dz+1)*9;
+                for(int lx=-1;lx<=CS;++lx){
+                    const int dx=lx<0?-1:(lx>=CS?1:0);
+                    ChunkMirror* m=mirrors[(dx+1)+mBase];
+                    if(m){
+                        const int li=(lx-dx*CS)+nly*CS+nlz*CS*CS;
+                        buffer[o++]=m->blockLight[li];
+                        buffer[o++]=m->skyLight[li];
+                    } else {
+                        buffer[o++]=0;
+                        buffer[o++]=255;
+                    }
+                }
+            }
+        }
+        LUA->PushString(reinterpret_cast<const char*>(buffer.data()),(unsigned int)buffer.size());
+        return 1;
+    }
+
     int StartBlockLightRebuild(ILuaBase* LUA) {
         if(blockdefs::g_lightEmission.size()!=blockdefs::g_states.size()
             ||blockdefs::g_lightOpacity.size()!=blockdefs::g_states.size()){LUA->PushBool(false);return 1;}

@@ -44,7 +44,7 @@ namespace mcmesh::meshbuild {
     void DestroyChunkMeshes(uint64_t chunkKey); void DestroyAllMeshes(); void StopWorkers();
     int CreateChunk(GarrysMod::Lua::ILuaBase*); int ApplyChunk(GarrysMod::Lua::ILuaBase*); int ApplyChunkCells(GarrysMod::Lua::ILuaBase*);
     int SetCell(GarrysMod::Lua::ILuaBase*); int GetCell(GarrysMod::Lua::ILuaBase*); int GetChunkCells(GarrysMod::Lua::ILuaBase*); int Think(GarrysMod::Lua::ILuaBase*);
-    int RebuildBlockLight(GarrysMod::Lua::ILuaBase*); int GetBlockLightChunk(GarrysMod::Lua::ILuaBase*); int GetSkyLightChunk(GarrysMod::Lua::ILuaBase*);
+    int RebuildBlockLight(GarrysMod::Lua::ILuaBase*); int GetBlockLightChunk(GarrysMod::Lua::ILuaBase*); int GetSkyLightChunk(GarrysMod::Lua::ILuaBase*); int GetLightingHalo(GarrysMod::Lua::ILuaBase*);
     int StartBlockLightRebuild(GarrysMod::Lua::ILuaBase*); int PollBlockLightRebuild(GarrysMod::Lua::ILuaBase*);
     int DrawChunk(GarrysMod::Lua::ILuaBase*); int UnloadChunk(GarrysMod::Lua::ILuaBase*);
     int ClearWorld(GarrysMod::Lua::ILuaBase*); int GetStats(GarrysMod::Lua::ILuaBase*);

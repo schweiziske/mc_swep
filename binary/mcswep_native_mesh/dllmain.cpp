@@ -81,6 +81,7 @@ GMOD_MODULE_OPEN()
 	fa.AddFunction("PollBlockLightRebuild", GTLUAF(mcmesh::meshbuild::PollBlockLightRebuild));
 	fa.AddFunction("GetBlockLightChunk", GTLUAF(mcmesh::meshbuild::GetBlockLightChunk));
 	fa.AddFunction("GetSkyLightChunk", GTLUAF(mcmesh::meshbuild::GetSkyLightChunk));
+	fa.AddFunction("GetLightingHalo", GTLUAF(mcmesh::meshbuild::GetLightingHalo));
 
 	// ---- 方块静态数据 ----
 	fa.AddFunction("SetBlockDefs", GTLUAF(mcmesh::blockdefs::SetBlockDefs));

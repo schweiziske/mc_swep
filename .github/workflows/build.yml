@@ -1,0 +1,65 @@
+name: build
+
+on:
+  push:
+    branches: [ main ]
+    tags: [ "v*" ]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-2022
+
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: x64
+            dll: gmcl_mcswep_native_mesh_win64.dll
+          - platform: Win32
+            dll: gmcl_mcswep_native_mesh_win32.dll
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: microsoft/setup-msbuild@v2
+
+      - name: Build (Release ${{ matrix.platform }}, WPO/LTCG on)
+        shell: pwsh
+        run: |
+          msbuild binary\mcswep_native_mesh\mcswep_native_mesh.vcxproj `
+            -target:Rebuild `
+            -property:Configuration=Release `
+            -property:Platform=${{ matrix.platform }} `
+            -property:PlatformToolset=v143 `
+            -property:OutDir=$env:GITHUB_WORKSPACE\out\ `
+            -maxCpuCount -verbosity:minimal -nologo
+
+      - name: SHA256 -> job summary
+        shell: pwsh
+        run: |
+          $hash = (Get-FileHash out\${{ matrix.dll }} -Algorithm SHA256).Hash
+          Write-Host "SHA256: $hash"
+          @"
+          ## ${{ matrix.dll }}
+          | | |
+          |---|---|
+          | SHA256 | ``$hash`` |
+          | commit | ``$env:GITHUB_SHA`` |
+          "@ | Out-File $env:GITHUB_STEP_SUMMARY -Append -Encoding utf8
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.dll }}
+          path: out\${{ matrix.dll }}
+
+      - name: Attach to release (tags only)
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out\${{ matrix.dll }}
+          generate_release_notes: true
