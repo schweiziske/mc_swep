@@ -9,7 +9,7 @@ Phase 5 strict importer:
   - supports modern sections[].block_states.palette/data
   - rejects legacy Level.Sections/Palette/BlockStates instead of guessing its packing layout
   - validates complete block states against the generated Minecraft report
-  - requires the exact generated DataVersion for every imported chunk
+  - auto-detects each chunk DataVersion within the audited storage-adapter range
   - preserves unknown Block Entity NBT as an inert typed sidecar
   - writes garrysmod/data/mc_import/*.json consumed by the mc_import command
   - does not execute Block Entity payloads or attempt Minecraft behavior simulation
@@ -770,16 +770,42 @@ def validate_chunk_data_version(
     actual = chunk_data_version(root)
     if actual is None:
         raise ImportValidationError("missing_data_version", f"chunk {cx},{cz} is missing DataVersion", chunk=[cx, cz])
-    if actual != expected and actual not in (allowed_compatible or set()):
-        raise ImportValidationError(
-            "data_version_mismatch",
-            f"chunk {cx},{cz} has DataVersion {actual}, expected {expected}",
-            chunk=[cx, cz],
-            actual=actual,
-            expected=expected,
-        )
+    # expected/allowed_compatible remain in the signature so older callers keep
+    # working. Compatibility is now determined by the audited storage adapter
+    # and the complete target-registry state validation performed during import.
     chunk_storage_adapter_for_data_version(actual, cx, cz)
     return actual
+
+
+def source_data_version_fields(
+    observed_versions: Any,
+    target_data_version: int,
+    target_minecraft_version: str,
+) -> dict[str, Any]:
+    observed = sorted({int(version) for version in (observed_versions or [])})
+    versions = observed or [int(target_data_version)]
+
+    adapters = sorted({
+        chunk_storage_adapter_for_data_version(version).adapter_id
+        for version in versions
+    })
+    primary = versions[-1]
+    exact = versions == [int(target_data_version)]
+    if exact:
+        minecraft_version = target_minecraft_version
+    elif len(versions) == 1:
+        minecraft_version = f"DataVersion-{primary}"
+    else:
+        minecraft_version = "mixed-DataVersion-" + ",".join(str(version) for version in versions)
+
+    return {
+        "storageAdapter": adapters[0] if len(adapters) == 1 else "mixed:" + ",".join(adapters),
+        "minecraftVersion": minecraft_version,
+        "dataVersion": primary,
+        "targetDataVersion": int(target_data_version),
+        "compatibility": "exact" if exact else "schema-validated-state-only",
+        "observedDataVersions": observed,
+    }
 
 
 def chunk_block_entities(root: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1132,18 +1158,13 @@ def make_output(
         chunk_list.append(record)
     metadata = registry.metadata
     observed_versions = sorted(data_versions or [])
-    if len(observed_versions) > 1:
-        raise ImportValidationError("mixed_data_versions", f"import contains mixed DataVersions: {observed_versions}")
-    source_data_version = observed_versions[0] if observed_versions else registry.world_version
-    source_storage_adapter = chunk_storage_adapter_for_data_version(source_data_version)
+    version_fields = source_data_version_fields(
+        observed_versions, registry.world_version, metadata["minecraftId"],
+    )
     source = {
         "format": "minecraft_java_anvil",
-        "storageAdapter": source_storage_adapter.adapter_id,
-        "minecraftVersion": metadata["minecraftId"] if source_data_version == registry.world_version else f"DataVersion-{source_data_version}",
+        **version_fields,
         "targetMinecraftVersion": metadata["minecraftId"],
-        "dataVersion": source_data_version,
-        "targetDataVersion": registry.world_version,
-        "compatibility": "exact" if source_data_version == registry.world_version else "schema-validated-state-only",
         "series": metadata["seriesId"],
         "dimension": args.dimension,
         "world": str(pathlib.Path(args.world)),
@@ -1153,7 +1174,6 @@ def make_output(
         "keepCoords": bool(args.keep_coords),
         "axisMapping": "minecraft x/-z/y -> gmod bx/by/bz",
         "maxBlocks": int(args.max_blocks or 0),
-        "observedDataVersions": observed_versions,
     }
     target = {
         "schemaHash": metadata["schemaHash"],
@@ -1188,6 +1208,7 @@ def make_output(
             "uniqueBlocks": len(unique),
             "clippedByMaxBlocks": clipped,
             "opaqueBlockEntities": sum(len(items) for items in opaque_entities.values()),
+            "observedDataVersions": version_fields["observedDataVersions"],
         },
         "lossReport": make_loss_report(report_events),
         "chunks": chunk_list,
@@ -1273,17 +1294,12 @@ def copy_bundle_metadata(target: dict[str, Any], source: dict[str, Any]) -> None
 def finalize_stream_bundle_metadata(save_fields: dict[str, Any], stats: dict[str, Any]) -> None:
     events = stats.pop("_lossEvents", [])
     observed = sorted(stats.pop("_observedDataVersions", set()))
-    if len(observed) > 1:
-        raise ImportValidationError("mixed_data_versions", f"import contains mixed DataVersions: {observed}")
     if observed and isinstance(save_fields.get("source"), dict):
-        actual = observed[0]
-        target = int(save_fields["source"].get("targetDataVersion") or save_fields["source"].get("dataVersion") or actual)
-        save_fields["source"]["dataVersion"] = actual
-        save_fields["source"]["observedDataVersions"] = observed
-        save_fields["source"]["storageAdapter"] = chunk_storage_adapter_for_data_version(actual).adapter_id
-        save_fields["source"]["compatibility"] = "exact" if actual == target else "schema-validated-state-only"
-        if actual != target:
-            save_fields["source"]["minecraftVersion"] = f"DataVersion-{actual}"
+        source = save_fields["source"]
+        target = int(source.get("targetDataVersion") or source.get("dataVersion") or observed[-1])
+        target_minecraft = str(source.get("targetMinecraftVersion") or source.get("minecraftVersion") or "")
+        source.update(source_data_version_fields(observed, target, target_minecraft))
+        stats["observedDataVersions"] = list(source["observedDataVersions"])
     if int(save_fields.get("v") or 0) >= PHASE5_FORMAT_VERSION:
         save_fields["lossReport"] = make_loss_report(events)
 
@@ -1936,7 +1952,7 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     p.add_argument("--origin", nargs=3, type=int, default=(0, 0, DEFAULT_ORIGIN_Z), metavar=("BX", "BY", "BZ"), help="GMod import origin (default: 0 0 0)")
     p.add_argument("--keep-coords", action="store_true", help="Keep MC x/-z/y as GMod bx/by/bz instead of offsetting them to origin")
     p.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS, help="Maximum number of blocks to export offline; 0 means unlimited")
-    p.add_argument("--allow-data-version", action="append", type=int, default=[], help="Explicitly allow source DataVersions that pass full schema validation; repeatable, default accepts only the target version")
+    p.add_argument("--allow-data-version", action="append", type=int, default=[], help="Deprecated compatibility option; supported source DataVersions are detected automatically")
     p.add_argument("--split-chunks", action=argparse.BooleanOptionalAction, default=True, help="write one small JSON per GMod chunk plus a manifest")
     p.add_argument("--save-name", help="Also write data/mc/saves/<name>.dat for mc_save_manager to read")
     p.add_argument("--save-out", help="Output path for the GMod save .dat; also writes same-named .json metadata")
@@ -2040,6 +2056,9 @@ def main(argv: list[str]) -> int:
         print(f"[MC import] JSON 输出: {out_path}")
     print(f"[MC import] 方块: {stats['blocks']}  GMod chunks: {stats['chunks']}  MC chunks: {stats['scannedMcChunks']}")
     print(f"[MC import] 唯一方块: {stats['uniqueBlocks']}  clipped={stats['clippedByMaxBlocks']}")
+    observed_versions = stats.get("observedDataVersions") or []
+    if observed_versions:
+        print("[MC import] 自动检测 DataVersion: " + ", ".join(str(version) for version in observed_versions))
     if len(written) > 1:
         print(f"[MC import] parts: {len(written) - 1}")
     if save_written:

@@ -25,17 +25,18 @@ through 4897. This corresponds to the modern root-level `sections` and
 `block_states` format introduced in Minecraft 1.18, up to the addon's current
 target, Minecraft 26.2 Pre-Release 4 (`DataVersion` 4897).
 
-By default, the importer only accepts the exact target `DataVersion` 4897. To
-import another structurally supported version, explicitly allow it:
+The importer automatically reads each selected chunk's `DataVersion` and
+chooses the audited storage adapter. A selection may contain multiple
+`DataVersion` values as long as every version is within the supported adapter
+range and every complete block state passes validation against the bundled
+target registry.
 
-```powershell
---allow-data-version 4671
-```
+Legacy 1.17-and-earlier chunk storage is not supported. Missing DataVersion,
+future or otherwise unaudited storage versions, old block names, and invalid
+or incomplete block-state properties are still rejected explicitly.
 
-This option may be repeated. Older block names and complete block-state
-properties must still pass validation against the bundled target registry.
-Legacy 1.17-and-earlier chunk storage is not supported, and a selected area
-may not contain mixed `DataVersion` values.
+`--allow-data-version` remains accepted for compatibility with older command
+lines, but supported versions no longer need to be listed manually.
 
 ## Quick start: create a named save
 
@@ -131,7 +132,7 @@ With `--keep-coords`, the original Minecraft coordinates are retained and
 --origin BX BY BZ            GMod destination origin; default: 0 0 0
 --keep-coords                Retain source coordinates and add the origin offset
 --max-blocks N               Maximum non-air blocks; 0 means unlimited
---allow-data-version N       Explicitly allow a compatible source DataVersion
+--allow-data-version N       Deprecated compatibility option; no longer required
 --out PATH                   Write an mc_import JSON bundle
 --split-chunks               Write a manifest and per-GMod-chunk files (default)
 --no-split-chunks            Write one JSON file
