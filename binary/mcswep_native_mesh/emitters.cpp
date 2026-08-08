@@ -5,6 +5,7 @@
 #include "meshworker.h"
 
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <vector>
 
@@ -24,13 +25,15 @@ namespace {
      {{0,16},{16,16},{16,0},{0,0}},{{0,16},{16,16},{16,0},{0,0}} };
 
     struct Context {
-        const mb::SectionSnapshot& s; mb::SectionBuild& o; int side, halo, ss; double BS;
+        const mb::SectionSnapshot& s; mb::SectionBuild& o; int side, halo, ss; double BS; bool copyOpaqueToLod = false;
         const mb::SnapshotCell& at(int x, int y, int z)const { return s.cells[size_t(x) + size_t(y) * side + size_t(z) * side * side]; }
         bool ensure(mb::PassVerts& p) {
-            const size_t totalVertices = o.opaque.vertices + o.translucent.vertices;
+            const size_t totalVertices = o.opaque.vertices + o.translucent.vertices + o.lodOpaque.vertices;
             if (totalVertices > mcmesh::meshworker::kMaxSectionResultBytes / sizeof(mb::Vert) - 6)return false;
-            if (p.batches.empty() || p.batches.back().verts.size() > mcmesh::MAX_VERTEX_COUNT - 6) {
-                if (p.batches.size() >= 64)return false; p.batches.emplace_back(); p.batches.back().verts.reserve(std::min<uint32_t>(mcmesh::MAX_VERTEX_COUNT, 12288));
+            if (p.batches.empty() || p.batches.back().vertices > mcmesh::MAX_VERTEX_COUNT - 6) {
+                if (p.batches.size() >= 64)return false; p.batches.emplace_back();
+                for (int group = 0; group < 6; ++group) p.batches.back().groups[group].reserve(2048);
+                p.batches.back().groups[mb::kUnassignedDirectionalGroup].reserve(256);
             }
             return true;
         }
@@ -38,11 +41,155 @@ namespace {
             const auto& A = bd::g_atlas; float px = float(tile % A.cols) * A.stride + A.pad + u16 / 16 * A.tile;
             float py = float(tile / A.cols) * A.stride + A.pad + v16 / 16 * A.tile; if (u16 <= 0)px += A.inset; else if (u16 >= 16)px -= A.inset; if (v16 <= 0)py += A.inset; else if (v16 >= 16)py -= A.inset; u = px / A.w; v = py / A.h;
         }
+        bool writeQuad(mb::PassVerts& p, int face, const float pos[4][3], const float uv[4][2], uint16_t tile, int lx, int ly, int lz, uint8_t tintCode) {
+            if (!ensure(p))return false; auto& b = p.batches.back(); const bool directional = &p == &o.opaque || &p == &o.lodOpaque; const int group = directional && face >= 0 && face < 6 ? face : mb::kUnassignedDirectionalGroup; auto& verts = b.groups[group]; for (int i : TRI) { mb::Vert v{}; for (int a = 0; a < 3; ++a) { v.pos[a] = float((a == 0 ? lx : a == 1 ? ly : lz) + pos[i][a]) * float(BS); v.normal[a] = N[face][a]; }atlas(tile, uv[i][0], uv[i][1], v.u, v.v); const uint16_t slot = s.lightSlot; v.rgba[0] = uint8_t(slot & 255); v.rgba[1] = uint8_t(((face + 1) & 7) | ((slot >> 8) << 3)); v.rgba[2] = tintCode; v.rgba[3] = 255; verts.push_back(v); }++b.faces; b.vertices += 6; ++p.faces; p.vertices += 6; return true;
+        }
         bool quad(mb::PassVerts& p, int face, const float pos[4][3], const float uv[4][2], uint16_t tile, int lx, int ly, int lz, uint8_t tintCode = 0) {
-            if (!ensure(p))return false; auto& b = p.batches.back(); for (int i : TRI) { mb::Vert v{}; for (int a = 0; a < 3; ++a) { v.pos[a] = float((a == 0 ? lx : a == 1 ? ly : lz) + pos[i][a]) * float(BS); v.normal[a] = N[face][a]; }atlas(tile, uv[i][0], uv[i][1], v.u, v.v); v.rgba[0] = 255; v.rgba[1] = uint8_t(face + 1); v.rgba[2] = tintCode; v.rgba[3] = 255; b.verts.push_back(v); }++b.faces; ++p.faces; p.vertices += 6; return true;
+            if (!writeQuad(p, face, pos, uv, tile, lx, ly, lz, tintCode))return false;
+            return !copyOpaqueToLod || &p != &o.opaque
+                || writeQuad(o.lodOpaque, face, pos, uv, tile, lx, ly, lz, tintCode);
         }
     };
     bool visible(const bd::BlockDef* cur, const mb::SnapshotCell& nb) { if (!nb.stateId)return true; auto* s = bd::FindState(nb.stateId); auto* d = s ? bd::FindDef(s->blockId) : nullptr; if (!d)return true; if (cur->liquid != bd::LiquidKind::None && d->liquid == cur->liquid)return false; if (bd::IsTransparent(d))return nb.stateId != 0 && nb.id != cur->id; return !s || !(s->flags & 4); }
+    struct GreedyCell { uint32_t stateId = 0; uint16_t tile = 0; bool set = false; };
+    bool sameGreedyCell(const GreedyCell& a, const GreedyCell& b) { return a.set && b.set && a.stateId == b.stateId && a.tile == b.tile; }
+    bool greedyCandidate(Context& c, int x, int y, int z, int face, GreedyCell* out = nullptr) {
+        const auto& cell = c.at(x, y, z); auto* d = bd::FindDef(cell.id); auto* od = bd::OrientEntry(d, cell.orient);
+        if (!d || !od || od->emitter != bd::EmitterKind::FullCube || od->pass || bd::IsTransparent(d))return false;
+        if (!visible(d, c.at(x + OFF[face][0], y + OFF[face][1], z + OFF[face][2])))return false;
+        if (out) { out->stateId = cell.stateId; out->tile = od->faces[face].tile; out->set = true; }
+        return true;
+    }
+    void greedyCoords(int face, int plane, int u, int v, int& x, int& y, int& z) {
+        if (face < 2) { x = u; y = v; z = plane; }
+        else if (face < 4) { x = plane; y = u; z = v; }
+        else { x = u; y = plane; z = v; }
+    }
+    bool emitGreedy(Context& c) {
+        std::vector<GreedyCell> mask(size_t(c.ss) * size_t(c.ss));
+        for (int face = 0; face < 6; ++face)for (int plane = 0; plane < c.ss; ++plane) {
+            std::fill(mask.begin(), mask.end(), GreedyCell{});
+            for (int v = 0; v < c.ss; ++v)for (int u = 0; u < c.ss; ++u) {
+                int x, y, z; greedyCoords(face, plane, u, v, x, y, z);
+                greedyCandidate(c, x + c.halo, y + c.halo, z + c.halo, face, &mask[size_t(u) + size_t(v) * c.ss]);
+            }
+            for (int v = 0; v < c.ss; ++v)for (int u = 0; u < c.ss;) {
+                GreedyCell key = mask[size_t(u) + size_t(v) * c.ss];
+                if (!key.set) { ++u; continue; }
+                int width = 1;
+                while (u + width < c.ss && sameGreedyCell(key, mask[size_t(u + width) + size_t(v) * c.ss]))++width;
+                int height = 1;
+                for (; v + height < c.ss; ++height) {
+                    bool rowMatches = true;
+                    for (int du = 0; du < width; ++du)if (!sameGreedyCell(key, mask[size_t(u + du) + size_t(v + height) * c.ss])) { rowMatches = false; break; }
+                    if (!rowMatches)break;
+                }
+                for (int dv = 0; dv < height; ++dv)for (int du = 0; du < width; ++du)mask[size_t(u + du) + size_t(v + dv) * c.ss].set = false;
+
+                int x, y, z; greedyCoords(face, plane, u, v, x, y, z);
+                const auto& cell = c.at(x + c.halo, y + c.halo, z + c.halo); auto* od = bd::OrientEntry(bd::FindDef(cell.id), cell.orient);
+                if (!od)return false;
+                float pos[4][3]; std::copy(&CUBE[face][0][0], &CUBE[face][0][0] + 12, &pos[0][0]);
+                for (int k = 0; k < 4; ++k) {
+                    if (face < 2) { pos[k][0] *= width; pos[k][1] *= height; }
+                    else if (face < 4) { pos[k][1] *= width; pos[k][2] *= height; }
+                    else { pos[k][0] *= width; pos[k][2] *= height; }
+                }
+                float uv[4][2]; for (int k = 0; k < 4; ++k) { uv[k][0] = od->faces[face].uv[k * 2]; uv[k][1] = od->faces[face].uv[k * 2 + 1]; }
+                int lx = c.s.lx0 + x, ly = c.s.ly0 + y, lz = c.s.lz0 + z;
+                if (!c.quad(c.o.opaque, face, pos, uv, key.tile, lx, ly, lz))return false;
+                ++c.o.emitters.faces[0];
+                u += width;
+            }
+        }
+        return true;
+    }
+    struct LodMacroCell {
+        bool solid = false;
+        std::array<uint8_t, 6> faceSource{};
+    };
+    bool lodEligible(const mb::SnapshotCell& cell) {
+        if (!cell.stateId || !cell.id)return false;
+        const auto* d = bd::FindDef(cell.id);
+        const auto* od = bd::OrientEntry(d, cell.orient);
+        return d && od && od->emitter == bd::EmitterKind::FullCube && !od->pass && !bd::IsTransparent(d);
+    }
+    bool lodSourceOnFace(int source, int face) {
+        const int x = source & 1, y = (source >> 1) & 1, z = (source >> 2) & 1;
+        return face == 0 ? z == 1 : face == 1 ? z == 0 : face == 2 ? x == 1
+            : face == 3 ? x == 0 : face == 4 ? y == 1 : y == 0;
+    }
+    const mb::SnapshotCell& lodSourceCell(Context& c, int mx, int my, int mz, int source) {
+        return c.at(c.halo + mx * 2 + (source & 1),
+            c.halo + my * 2 + ((source >> 1) & 1),
+            c.halo + mz * 2 + ((source >> 2) & 1));
+    }
+    LodMacroCell buildLodMacro(Context& c, int mx, int my, int mz) {
+        LodMacroCell macro;
+        macro.faceSource.fill(0xff);
+        std::array<bool, 8> eligible{};
+        int count = 0, fallback = -1;
+        for (int source = 0; source < 8; ++source) {
+            eligible[source] = lodEligible(lodSourceCell(c, mx, my, mz, source));
+            if (!eligible[source])continue;
+            ++count;
+            if (fallback < 0)fallback = source;
+        }
+        // Four cells preserve a one-block-thick wall/floor inside a 2x2x2 macro voxel.
+        if (count < 4)return macro;
+        macro.solid = true;
+        for (int face = 0; face < 6; ++face) {
+            for (int source = 0; source < 8; ++source) {
+                if (eligible[source] && lodSourceOnFace(source, face)) {
+                    macro.faceSource[face] = uint8_t(source);
+                    break;
+                }
+            }
+            if (macro.faceSource[face] == 0xff)macro.faceSource[face] = uint8_t(fallback);
+        }
+        return macro;
+    }
+    bool emitLod(Context& c) {
+        if ((c.ss & 1) != 0 || c.halo < 2)return false;
+        const int macroCount = c.ss / 2;
+        const int side = macroCount + 2;
+        std::vector<LodMacroCell> macros(size_t(side) * size_t(side) * size_t(side));
+        auto index = [side](int x, int y, int z) {
+            return size_t(x + 1) + size_t(y + 1) * side + size_t(z + 1) * side * side;
+        };
+        for (int z = -1; z <= macroCount; ++z)
+        for (int y = -1; y <= macroCount; ++y)
+        for (int x = -1; x <= macroCount; ++x)
+            macros[index(x, y, z)] = buildLodMacro(c, x, y, z);
+
+        for (int z = 0; z < macroCount; ++z)
+        for (int y = 0; y < macroCount; ++y)
+        for (int x = 0; x < macroCount; ++x) {
+            const LodMacroCell& macro = macros[index(x, y, z)];
+            if (!macro.solid)continue;
+            for (int face = 0; face < 6; ++face) {
+                if (macros[index(x + OFF[face][0], y + OFF[face][1], z + OFF[face][2])].solid)continue;
+                const int source = macro.faceSource[face];
+                if (source < 0 || source >= 8)return false;
+                const auto& cell = lodSourceCell(c, x, y, z, source);
+                const auto* od = bd::OrientEntry(bd::FindDef(cell.id), cell.orient);
+                if (!od || od->faces.size() < 6)return false;
+                float pos[4][3];
+                std::copy(&CUBE[face][0][0], &CUBE[face][0][0] + 12, &pos[0][0]);
+                for (int vertex = 0; vertex < 4; ++vertex)
+                    for (int axis = 0; axis < 3; ++axis)pos[vertex][axis] *= 2.f;
+                float uv[4][2];
+                for (int vertex = 0; vertex < 4; ++vertex) {
+                    uv[vertex][0] = od->faces[face].uv[vertex * 2];
+                    uv[vertex][1] = od->faces[face].uv[vertex * 2 + 1];
+                }
+                if (!c.quad(c.o.lodOpaque, face, pos, uv, od->faces[face].tile,
+                    c.s.lx0 + x * 2, c.s.ly0 + y * 2, c.s.lz0 + z * 2))return false;
+            }
+        }
+        c.o.lodReady = true;
+        return true;
+    }
     void rotateUV(float& u, float& v, int r, bool fu, bool fv) { for (int i = 0; i < (r & 3); ++i) { float nu = v, nv = 16 - u; u = nu; v = nv; }if (fu)u = 16 - u; if (fv)v = 16 - v; }
     void rotateFlags(bool& u, bool& v, int r) { for (int i = 0; i < (r & 3); ++i) { bool nu = v, nv = !u; u = nu; v = nv; } }
     void boxCorners(const bd::Box& b, int f, float p[4][3]) { float x0 = b.v[0], y0 = b.v[1], z0 = b.v[2], x1 = b.v[3], y1 = b.v[4], z1 = b.v[5]; const float t[6][4][3] = { {{x0,y0,z1},{x1,y0,z1},{x1,y1,z1},{x0,y1,z1}},{{x0,y1,z0},{x1,y1,z0},{x1,y0,z0},{x0,y0,z0}},{{x1,y0,z0},{x1,y1,z0},{x1,y1,z1},{x1,y0,z1}},{{x0,y1,z0},{x0,y0,z0},{x0,y0,z1},{x0,y1,z1}},{{x1,y1,z0},{x0,y1,z0},{x0,y1,z1},{x1,y1,z1}},{{x0,y0,z0},{x1,y0,z0},{x1,y0,z1},{x0,y0,z1}} }; std::copy(&t[f][0][0], &t[f][0][0] + 12, &p[0][0]); }
@@ -62,13 +209,13 @@ namespace {
     uint16_t u16le(const uint8_t* p) { return uint16_t(p[0]) | (uint16_t(p[1]) << 8); }int16_t i16le(const uint8_t* p) { return int16_t(u16le(p)); }
     uint16_t selectModel(uint16_t groupId, uint16_t planId, int bx, int by, int bz) { const auto& V = bd::g_visual; const auto& g = V.groups[groupId - 1]; if (g.alternativeCount == 1)return V.alternatives[g.firstAlternative].modelId; uint32_t total = 0; for (uint32_t i = 0; i < g.alternativeCount; ++i)total += V.alternatives[g.firstAlternative + i].weight; uint32_t h = uint32_t(bx) * 73428767u ^ uint32_t(by) * 912931u ^ uint32_t(bz) * 19349663u ^ uint32_t(groupId + uint32_t(planId) * 131u) * 83492791u; uint32_t choice = (h & 0x7fffffffu) % total; for (uint32_t i = 0; i < g.alternativeCount; ++i) { const auto& a = V.alternatives[g.firstAlternative + i]; if (choice < a.weight)return a.modelId; choice -= a.weight; }return V.alternatives[g.firstAlternative].modelId; }
     uint8_t tintCode(uint32_t stateId, uint8_t tintIndex) { const auto& v = bd::g_visual; if (tintIndex == 0xff || tintIndex >= v.tintSlot.size() || stateId >= v.catalogStateCount)return 0; uint8_t slot = v.tintSlot[tintIndex]; if (slot == 0xff || slot >= v.tintSlotCount)return 0; size_t offset = size_t(stateId) * v.tintSlotCount + slot; return offset < v.stateTintCodes.size() ? v.stateTintCodes[offset] : 0; }
-    int stairFacing(uint8_t orient) { return orient & 3; }bool stairHalf(const mb::SnapshotCell& c) { return (c.orient & 4) != 0; }bool stairAt(const mb::SnapshotCell& c, int& f, bool& h) { auto* s = bd::FindState(c.stateId); if (!s || !(s->flags & bd::STATE_STAIRS))return false; f = stairFacing(c.orient); h = stairHalf(c); return true; }uint16_t stairPlan(Context& c, int x, int y, int z, const mb::SnapshotCell& cell) { auto* s = bd::FindState(cell.stateId); if (!s || !(s->flags & bd::STATE_STAIRS))return 0; static const int dx[4] = { 0,0,-1,1 }, dy[4] = { -1,1,0,0 }, opp[4] = { 1,0,3,2 }, ccw[4] = { 2,3,1,0 }; int facing = stairFacing(cell.orient); bool half = stairHalf(cell); auto canTake = [&](int direction) {int nf; bool nh; return !stairAt(c.at(x + dx[direction], y + dy[direction], z), nf, nh) || nf != facing || nh != half; }; int af; bool ah; if (stairAt(c.at(x + dx[facing], y + dy[facing], z), af, ah) && ah == half && (af / 2) != (facing / 2) && canTake(opp[af]))return s->stairPlans[af == ccw[facing] ? 3 : 4]; int behind = opp[facing], bf; bool bh; if (stairAt(c.at(x + dx[behind], y + dy[behind], z), bf, bh) && bh == half && (bf / 2) != (facing / 2) && canTake(bf))return s->stairPlans[bf == ccw[facing] ? 1 : 2]; return s->stairPlans[0]; }
-    bool emitGenerated(Context& c, const mb::SnapshotCell& cell, mb::PassVerts& p, int lx, int ly, int lz, uint16_t overridePlan = 0) { const auto& V = bd::g_visual; if (!V.loaded || cell.stateId >= V.statePlans.size())return false; uint16_t planId = overridePlan ? overridePlan : V.statePlans[cell.stateId]; if (!planId)return false; const auto& plan = V.plans[planId - 1]; int bx = c.s.cx * mcmesh::kCS + lx, by = c.s.cy * mcmesh::kCS + ly, bz = c.s.cz * mcmesh::kCH + lz; for (uint32_t gi = 0; gi < plan.groupCount; ++gi) { uint16_t groupId = V.planGroups[plan.firstGroup + gi]; uint16_t modelId = selectModel(groupId, planId, bx, by, bz); const auto& m = V.models[modelId - 1]; if (!m.geometryId)continue; const auto& geo = V.geometries[m.geometryId - 1]; const auto& surfs = V.surfaceSets[m.surfaceId - 1]; for (uint32_t qi = 0; qi < geo.quadCount; ++qi) { const auto& raw = V.quads[geo.firstQuad + qi].bytes; int face = (raw[0] & 7) - 1; uint8_t tint = (raw[0] >> 3); tint = tint ? tint - 1 : 0xff; uint8_t localSurface = raw[1], rot = (raw[2] + m.uvRotationAdd[face]) & 3, flags = raw[3]; if (localSurface > surfs.entryCount)return false; uint16_t surface = V.surfaces[surfs.firstEntry + localSurface - 1], tile = surface & 0x0fff; float inset16 = bd::g_atlas.tile ? 16.f * bd::g_atlas.inset / bd::g_atlas.tile : 0.f; float u0 = raw[4] * .5f + inset16, v0 = raw[5] * .5f + inset16, u1 = raw[6] * .5f - inset16, v1 = raw[7] * .5f - inset16, pos[4][3], uv[4][2]; for (int vi = 0; vi < 4; ++vi) { for (int a = 0; a < 3; ++a)pos[vi][a] = float(i16le(raw.data() + 8 + vi * 6 + a * 2)) / float(V.coordinateScale); bool useU = (flags & (1u << (vi * 2))) != 0, useV = (flags & (1u << (vi * 2 + 1))) != 0; rotateFlags(useU, useV, rot); float u = useU ? u1 : u0, v = useV ? v1 : v0; uv[vi][0] = u; uv[vi][1] = v; }bool boundary = true; for (int vi = 0; vi < 4; ++vi) { float q = face == 0 ? pos[vi][2] - 1 : face == 1 ? pos[vi][2] : face == 2 ? pos[vi][0] - 1 : face == 3 ? pos[vi][0] : face == 4 ? pos[vi][1] - 1 : pos[vi][1]; if (std::abs(q) > EPS) { boundary = false; break; } }const auto* state = bd::FindState(cell.stateId); bool cullGenerated = !state || ((state->flags & bd::STATE_CULL_GENERATED_FACES) != 0); if (boundary && cullGenerated && !visible(bd::FindDef(cell.id), c.at(c.halo + (lx - c.s.lx0) + OFF[face][0], c.halo + (ly - c.s.ly0) + OFF[face][1], c.halo + (lz - c.s.lz0) + OFF[face][2])))continue; if (!c.quad(p, face, pos, uv, tile, lx, ly, lz, tintCode(cell.stateId, tint)))return false; } }return true; }
+    int stairFacing(uint8_t orient) { return orient & 3; }bool stairHalf(const mb::SnapshotCell& c) { return (c.orient & 4) != 0; }bool stairAt(const mb::SnapshotCell& c, int& f, bool& h) { auto* s = bd::FindState(c.stateId); if (!s || !(s->flags & 2))return false; f = stairFacing(c.orient); h = stairHalf(c); return true; }uint16_t stairPlan(Context& c, int x, int y, int z, const mb::SnapshotCell& cell) { auto* s = bd::FindState(cell.stateId); if (!s || !(s->flags & 2))return 0; static const int dx[4] = { 0,0,-1,1 }, dy[4] = { -1,1,0,0 }, opp[4] = { 1,0,3,2 }, ccw[4] = { 2,3,1,0 }; int facing = stairFacing(cell.orient); bool half = stairHalf(cell); auto canTake = [&](int direction) {int nf; bool nh; return !stairAt(c.at(x + dx[direction], y + dy[direction], z), nf, nh) || nf != facing || nh != half; }; int af; bool ah; if (stairAt(c.at(x + dx[facing], y + dy[facing], z), af, ah) && ah == half && (af / 2) != (facing / 2) && canTake(opp[af]))return s->stairPlans[af == ccw[facing] ? 3 : 4]; int behind = opp[facing], bf; bool bh; if (stairAt(c.at(x + dx[behind], y + dy[behind], z), bf, bh) && bh == half && (bf / 2) != (facing / 2) && canTake(bf))return s->stairPlans[bf == ccw[facing] ? 1 : 2]; return s->stairPlans[0]; }
+    bool emitGenerated(Context& c, const mb::SnapshotCell& cell, mb::PassVerts& p, int lx, int ly, int lz, uint16_t overridePlan = 0) { const auto& V = bd::g_visual; if (!V.loaded || cell.stateId >= V.statePlans.size())return false; uint16_t planId = overridePlan ? overridePlan : V.statePlans[cell.stateId]; if (!planId)return false; const auto& plan = V.plans[planId - 1]; int bx = c.s.cx * mcmesh::kCS + lx, by = c.s.cy * mcmesh::kCS + ly, bz = c.s.cz * mcmesh::kCH + lz; for (uint32_t gi = 0; gi < plan.groupCount; ++gi) { uint16_t groupId = V.planGroups[plan.firstGroup + gi]; uint16_t modelId = selectModel(groupId, planId, bx, by, bz); const auto& m = V.models[modelId - 1]; if (!m.geometryId)continue; const auto& geo = V.geometries[m.geometryId - 1]; const auto& surfs = V.surfaceSets[m.surfaceId - 1]; for (uint32_t qi = 0; qi < geo.quadCount; ++qi) { const auto& raw = V.quads[geo.firstQuad + qi].bytes; int face = (raw[0] & 7) - 1; uint8_t tint = (raw[0] >> 3); tint = tint ? tint - 1 : 0xff; uint8_t localSurface = raw[1], rot = (raw[2] + m.uvRotationAdd[face]) & 3, flags = raw[3]; if (localSurface > surfs.entryCount)return false; uint16_t surface = V.surfaces[surfs.firstEntry + localSurface - 1], tile = surface & 0x0fff; float inset16 = bd::g_atlas.tile ? 16.f * bd::g_atlas.inset / bd::g_atlas.tile : 0.f; float u0 = raw[4] * .5f + inset16, v0 = raw[5] * .5f + inset16, u1 = raw[6] * .5f - inset16, v1 = raw[7] * .5f - inset16, pos[4][3], uv[4][2]; for (int vi = 0; vi < 4; ++vi) { for (int a = 0; a < 3; ++a)pos[vi][a] = float(i16le(raw.data() + 8 + vi * 6 + a * 2)) / float(V.coordinateScale); bool useU = (flags & (1u << (vi * 2))) != 0, useV = (flags & (1u << (vi * 2 + 1))) != 0; rotateFlags(useU, useV, rot); float u = useU ? u1 : u0, v = useV ? v1 : v0; uv[vi][0] = u; uv[vi][1] = v; }bool boundary = true; for (int vi = 0; vi < 4; ++vi) { float q = face == 0 ? pos[vi][2] - 1 : face == 1 ? pos[vi][2] : face == 2 ? pos[vi][0] - 1 : face == 3 ? pos[vi][0] : face == 4 ? pos[vi][1] - 1 : pos[vi][1]; if (std::abs(q) > EPS) { boundary = false; break; } }bool cullGenerated = !bd::FindState(cell.stateId) || ((bd::FindState(cell.stateId)->flags & 8) != 0); if (boundary && cullGenerated && !visible(bd::FindDef(cell.id), c.at(c.halo + (lx - c.s.lx0) + OFF[face][0], c.halo + (ly - c.s.ly0) + OFF[face][1], c.halo + (lz - c.s.lz0) + OFF[face][2])))continue; if (!c.quad(p, face, pos, uv, tile, lx, ly, lz, tintCode(cell.stateId, tint)))return false; } }return true; }
 }
 namespace mcmesh::emitters {
     bool Build(const mb::SectionSnapshot& s, mb::SectionBuild& o) {
-        Context c{ s,o,s.side,s.halo,s.coreSize,mcmesh::kBS }; for (int z = c.halo; z < c.halo + c.ss; ++z)for (int y = c.halo; y < c.halo + c.ss; ++y)for (int x = c.halo; x < c.halo + c.ss; ++x) {
-            auto cell = c.at(x, y, z); auto* d = bd::FindDef(cell.id); if (!d)continue; auto* od = bd::OrientEntry(d, cell.orient); if (!od)return false; const auto* state = bd::FindState(cell.stateId); int lx = s.lx0 + x - c.halo, ly = s.ly0 + y - c.halo, lz = s.lz0 + z - c.halo; if (d->liquid == bd::LiquidKind::None && d->connection == bd::ConnectionKind::None && state && (state->flags & bd::STATE_USE_GENERATED_VISUAL) && bd::g_visual.loaded && cell.stateId < bd::g_visual.statePlans.size() && bd::g_visual.statePlans[cell.stateId]) { auto& p = od->pass ? o.translucent : o.opaque; int before = p.faces; uint16_t derivedPlan = stairPlan(c, x, y, z, cell); if (!emitGenerated(c, cell, p, lx, ly, lz, derivedPlan))return false; ++o.emitters.blocks[2]; o.emitters.faces[2] += p.faces - before; continue; }auto& p = od->pass ? o.translucent : o.opaque; int ef = int(od->emitter) - 1; ++o.emitters.blocks[ef]; int before = p.faces;
+        Context c{ s,o,s.side,s.halo,s.coreSize,mcmesh::kBS }; if (mb::g_simpleGreedyEnabled && !emitGreedy(c))return false; for (int z = c.halo; z < c.halo + c.ss; ++z)for (int y = c.halo; y < c.halo + c.ss; ++y)for (int x = c.halo; x < c.halo + c.ss; ++x) {
+            auto cell = c.at(x, y, z); auto* d = bd::FindDef(cell.id); if (!d)continue; auto* od = bd::OrientEntry(d, cell.orient); if (!od)return false; c.copyOpaqueToLod = mb::g_lodBuildEnabled && !od->pass && !lodEligible(cell); int lx = s.lx0 + x - c.halo, ly = s.ly0 + y - c.halo, lz = s.lz0 + z - c.halo; if (mb::g_simpleGreedyEnabled && od->emitter == bd::EmitterKind::FullCube && !od->pass && !bd::IsTransparent(d)) { ++o.emitters.blocks[0]; continue; }if (d->liquid == bd::LiquidKind::None && d->connection == bd::ConnectionKind::None && bd::g_visual.loaded && cell.stateId < bd::g_visual.statePlans.size() && bd::g_visual.statePlans[cell.stateId]) { auto& p = od->pass ? o.translucent : o.opaque; int before = p.faces; uint16_t derivedPlan = stairPlan(c, x, y, z, cell); if (!emitGenerated(c, cell, p, lx, ly, lz, derivedPlan))return false; ++o.emitters.blocks[2]; o.emitters.faces[2] += p.faces - before; continue; }auto& p = od->pass ? o.translucent : o.opaque; int ef = int(od->emitter) - 1; ++o.emitters.blocks[ef]; int before = p.faces;
             if (od->emitter == bd::EmitterKind::FullCube) { for (int f = 0; f < 6; ++f)if (visible(d, c.at(x + OFF[f][0], y + OFF[f][1], z + OFF[f][2]))) { float uv[4][2]; for (int k = 0; k < 4; ++k) { uv[k][0] = od->faces[f].uv[k * 2]; uv[k][1] = od->faces[f].uv[k * 2 + 1]; }if (!c.quad(p, f, CUBE[f], uv, od->faces[f].tile, lx, ly, lz))return false; } }
             else if (od->emitter == bd::EmitterKind::Cross) { float a = .08f, q = .92f; float p1[4][3] = { {a,a,0},{q,q,0},{q,q,1},{a,a,1} }, p2[4][3] = { {q,a,0},{a,q,0},{a,q,1},{q,a,1} }, rev[4][3], uv[4][2] = { {0,16},{16,16},{16,0},{0,0} }, revUv[4][2]; for (int k = 0; k < 4; ++k) { for (int j = 0; j < 3; ++j)rev[k][j] = p1[3 - k][j]; for (int j = 0; j < 2; ++j)revUv[k][j] = uv[3 - k][j]; }if (!c.quad(p, 4, p1, uv, od->faces[0].tile, lx, ly, lz) || !c.quad(p, 5, rev, revUv, od->faces[0].tile, lx, ly, lz))return false; for (int k = 0; k < 4; ++k)for (int j = 0; j < 3; ++j)rev[k][j] = p2[3 - k][j]; if (!c.quad(p, 2, p2, uv, od->faces[0].tile, lx, ly, lz) || !c.quad(p, 3, rev, revUv, od->faces[0].tile, lx, ly, lz))return false; }
             else if (od->emitter == bd::EmitterKind::Liquid) { auto k = d->liquid; float hs = fluidAt(c, x, y, z, k), xn = fluidAt(c, x - 1, y, z, k), xp = fluidAt(c, x + 1, y, z, k), yn = fluidAt(c, x, y - 1, z, k), yp = fluidAt(c, x, y + 1, z, k); float h[4]; if (hs >= 1)std::fill(h, h + 4, 1); else { h[0] = avg(c, k, hs, yn, xn, x - 1, y - 1, z); h[1] = avg(c, k, hs, yn, xp, x + 1, y - 1, z); h[2] = avg(c, k, hs, yp, xp, x + 1, y + 1, z); h[3] = avg(c, k, hs, yp, xn, x - 1, y + 1, z); }bool up = visible(d, c.at(x, y, z + 1)), down = visible(d, c.at(x, y, z - 1)); for (float& v : h)v = std::max(0.f, v - (up ? FLUID_OFF : 0)); float uvfull[4][2] = { {0,16},{16,16},{16,0},{0,0} }, pos[4][3]; if (up) { float t[4][3] = { {0,0,h[0]},{1,0,h[1]},{1,1,h[2]},{0,1,h[3]} }; if (!c.quad(p, 0, t, uvfull, od->faces[0].tile, lx, ly, lz))return false; }float bot = down ? FLUID_OFF : 0; if (down) { float t[4][3] = { {0,1,bot},{1,1,bot},{1,0,bot},{0,0,bot} }; if (!c.quad(p, 1, t, uvfull, od->faces[1].tile, lx, ly, lz))return false; }for (int f = 2; f < 6; ++f)if (visible(d, c.at(x + OFF[f][0], y + OFF[f][1], z))) { float inset = FLUID_OFF; float hh0 = f == 2 ? h[1] : f == 3 ? h[3] : f == 4 ? h[2] : h[0], hh1 = f == 2 ? h[2] : f == 3 ? h[0] : f == 4 ? h[3] : h[1]; boxCorners(bd::Box{ {f == 3 ? inset : 0,f == 5 ? inset : 0,bot,f == 2 ? 1 - inset : 1,f == 4 ? 1 - inset : 1,1} }, f, pos); pos[2][2] = hh1; pos[3][2] = hh0; float uv[4][2] = { {0,8},{8,8},{8,std::clamp((1 - hh1) * 8.f,0.f,8.f)},{0,std::clamp((1 - hh0) * 8.f,0.f,8.f)} }; if (!c.quad(p, f, pos, uv, od->faces[f].tile, lx, ly, lz))return false; } }
@@ -92,6 +239,7 @@ namespace mcmesh::emitters {
             }
             o.emitters.faces[ef] += p.faces - before;
         }
+        if (mb::g_lodBuildEnabled && !emitLod(c))return false;
         return true;
     }
 }

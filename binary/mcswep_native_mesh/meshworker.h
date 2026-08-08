@@ -17,12 +17,14 @@ namespace mcmesh::meshworker {
     constexpr size_t kMinInFlight = 8;
     constexpr size_t kMaxSectionResultBytes = 32u * 1024u * 1024u;
     constexpr size_t kMaxInFlightBytes = 128u * 1024u * 1024u;
-    constexpr bool kWorkerCreatesMeshes = false;
+    constexpr bool kWorkerCreatesMeshes = true;
 
     struct Job {
         uint64_t chunkKey = 0;
         int section = 0;
         uint64_t generation = 0;
+        bool profile = false;
+        double enqueuedAt = 0.0;
         meshbuild::SectionSnapshot snapshot;
     };
 
@@ -30,6 +32,8 @@ namespace mcmesh::meshworker {
         uint64_t chunkKey = 0;
         int section = 0;
         uint64_t generation = 0;
+        uint16_t lightSlot = 0;
+        uint64_t lightGeneration = 0;
         bool ok = true;
         bool meshesReady = false;
         bool meshCreateFailed = false;
@@ -37,8 +41,10 @@ namespace mcmesh::meshworker {
         double buildUs = 0.0;
         double vertexBuildUs = 0.0;
         double meshStageUs = 0.0;
+        double queueWaitUs = 0.0;
         meshbuild::SectionBuild build;
         meshbuild::SectionMeshes stagedMeshes;
+        meshbuild::MeshStageStats stageStats;
     };
 
     struct Stats {

@@ -61,12 +61,13 @@ PHASE5_FORMAT_VERSION = 10
 MAX_NBT_DEPTH = 64
 MAX_NBT_COLLECTION_ITEMS = 1_048_576
 MAX_DECOMPRESSED_CHUNK_BYTES = 64 * 1024 * 1024
+ALLOW_INVALID_NBT_UTF8 = False
 
-# 坐标映射：MC x/-z/y -> GMod bx/by/bz（行列式 +1，不镜像）。
-# GMod 侧把 Source -Y 命名为 north（左手系命名），而 MC north 是 -Z（右手系），
-# 因此朴素的 x->x/z->y 交换必然镜像；负号落在 Z 轴上，代价是 MC 南北落到
-# GMod 的北南。下面的方向/轴/旋转表与该映射联动，且都必须保持对合
-# （应用两次等于恒等，见 phase5 测试的闭包断言）。
+# Coordinate mapping: MC x/-z/y -> GMod bx/by/bz (determinant +1, no mirror).
+# GMod names Source -Y north (left-handed naming), while Minecraft north is -Z
+# (right-handed). A plain x->x/z->y swap would mirror the result, so the sign
+# stays on Z. The direction, axis, and rotation tables below are coupled to this
+# mapping and must remain involutions (applying them twice is the identity).
 IMPORT_DIRECTIONS = {
     "north": "south",
     "east": "east",
@@ -76,6 +77,10 @@ IMPORT_DIRECTIONS = {
 IMPORT_AXES = {"x": "x", "y": "y", "z": "z"}
 IMPORT_LEFT_RIGHT = {"left": "right", "right": "left"}
 IMPORT_LEFT_RIGHT_PROPERTIES = frozenset({"hinge", "type", "side_chain"})
+IMPORT_BLOCK_RENAMES = {
+    # 26.2 introduced copper chains and renamed the pre-existing chain block.
+    "minecraft:chain": "minecraft:iron_chain",
+}
 IMPORT_ROTATIONS = {str(value): str((8 - value) % 16) for value in range(16)}
 IMPORT_HORIZONTAL_PAIRS = {
     frozenset(("north", "south")): "north_south",
@@ -121,7 +126,7 @@ class NBTReader:
         if n < 0:
             raise ImportValidationError("negative_nbt_length", f"NBT length is negative: {n}")
         if self.pos + n > len(self.data):
-            raise EOFError("NBT 数据不完整")
+            raise EOFError("incomplete NBT data")
         out = self.data[self.pos : self.pos + n]
         self.pos += n
         return out
@@ -149,9 +154,12 @@ class NBTReader:
 
     def string(self) -> str:
         n = struct.unpack(">H", self.read(2))[0]
+        raw = self.read(n)
         try:
-            return self.read(n).decode("utf-8", "strict")
+            return raw.decode("utf-8", "strict")
         except UnicodeDecodeError as exc:
+            if ALLOW_INVALID_NBT_UTF8:
+                return raw.decode("utf-8", "replace")
             raise ImportValidationError("invalid_nbt_utf8", "NBT string is not valid UTF-8") from exc
 
     def payload(self, tag: int, depth: int = 0) -> Any:
@@ -210,12 +218,12 @@ class NBTReader:
             if n > MAX_NBT_COLLECTION_ITEMS:
                 raise ImportValidationError("nbt_collection_limit", f"NBT long array has {n} elements")
             return NBTArray([self.i64() for _ in range(n)], TAG_LONG)
-        raise ValueError(f"未知 NBT tag: {tag}")
+        raise ValueError(f"unknown NBT tag: {tag}")
 
     def root(self) -> dict[str, Any]:
         tag = self.u8()
         if tag != TAG_COMPOUND:
-            raise ValueError("NBT root 不是 compound")
+            raise ValueError("NBT root is not a compound")
         _name = self.string()
         return self.payload(tag, 0)
 
@@ -374,6 +382,7 @@ class BlockStateRegistry:
         name = entry.get("Name")
         if not isinstance(name, str) or not re.fullmatch(r"[a-z0-9_.-]+:[a-z0-9_./-]+", name):
             raise ImportValidationError("invalid_block_name", f"invalid block name: {name!r}")
+        name = IMPORT_BLOCK_RENAMES.get(name, name)
         schema = self.schemas.get(name)
         if schema is None:
             raise ImportValidationError("unknown_block", f"unknown block: {name}", block=name)
@@ -431,7 +440,7 @@ class BlockStateRegistry:
 
 
 def _generated_asset_path(repo_root: pathlib.Path, filename: str, primary: pathlib.Path) -> pathlib.Path:
-    """Resolve generated assets from either the full tree or the published tools bundle."""
+    """Resolve generated assets from a full addon tree or this published tools bundle."""
     candidates = (
         repo_root / primary,
         repo_root / "tools" / "data" / filename,
@@ -944,7 +953,7 @@ def read_region_chunk(region_path: pathlib.Path, local_cx: int, local_cz: int) -
         if len(payload) > MAX_DECOMPRESSED_CHUNK_BYTES:
             raise ImportValidationError("chunk_decompressed_too_large", "uncompressed chunk exceeds 64 MiB")
     else:
-        raise ValueError(f"{region_path.name} chunk {local_cx},{local_cz} 使用暂不支持的压缩类型 {ctype}")
+        raise ValueError(f"{region_path.name} chunk {local_cx},{local_cz} uses unsupported compression type {ctype}")
     return read_nbt(payload)
 
 
@@ -963,7 +972,7 @@ def dest_pos(
 ) -> tuple[int, int, int]:
     if keep_coords:
         return x + origin[0], -z + origin[1], y + origin[2]
-    # by 以 hi[2] 为基准，使负向的 -z 轴仍从 origin 开始正向延伸。
+    # Anchor by at hi[2] so the negative -z axis still extends forward from origin.
     return x - lo[0] + origin[0], hi[2] - z + origin[1], y - lo[1] + origin[2]
 
 
@@ -1024,7 +1033,7 @@ def find_region_dir(world: pathlib.Path, dimension: str) -> pathlib.Path:
     for path in candidates:
         if path.is_dir():
             return path
-    raise FileNotFoundError("找不到 region 目录，试过: " + ", ".join(str(p) for p in candidates))
+    raise FileNotFoundError("region directory not found; tried: " + ", ".join(str(p) for p in candidates))
 
 
 def import_world(args: argparse.Namespace, registry: BlockStateRegistry | None = None) -> dict[str, Any]:
@@ -1348,7 +1357,7 @@ def write_gmod_save_meta(
         "chunks": chunks,
         "blocks": blocks,
     }
-    meta_path = save_path.with_suffix(".json")
+    meta_path = save_path.parent / "meta.json" if save_path.name == "manifest.json" else save_path.with_suffix(".json")
     meta_path.write_text(json.dumps(meta, ensure_ascii=False, indent=2), encoding="utf-8")
     return meta_path
 
@@ -1396,13 +1405,16 @@ def write_gmod_save_chunked(
 
     written_parts: list[pathlib.Path] = []
     part_names: list[Any] = []
+    # JSON is now a sparse compatibility lane: only records that carry
+    # Block Entity/opaque side data remain there. State-only records live only
+    # in the MCB4 sidecar.
     part_chunks: list[Any] = []
     part_bytes = 96
     artifact_version = int(save_fields.get("v") or 7)
 
     def flush_part() -> None:
         nonlocal part_chunks, part_bytes
-        if not part_chunks:
+        if not part_chunks and not part_fast_fragments:
             return
         index = len(written_parts) + 1
         part_path = part_dir / f"part_{index:05d}.dat"
@@ -1441,6 +1453,8 @@ def write_gmod_save_chunked(
         "parts": part_names,
         "stats": manifest_stats,
     }
+    if manifest_stats.get("fastChunks", 0):
+        manifest["fastFormat"] = "MCB4"
     source = save_fields.get("source")
     if source is not None:
         manifest["source"] = source
@@ -1464,6 +1478,130 @@ def chunk_key_text(cx: int, cy: int, cz: int) -> str:
     return f"{int(cx)}:{int(cy)}:{int(cz)}"
 
 
+# Region sharding mirrors Minecraft's r.<X>.<Z>.mca layout: one file per
+# REGION_CHUNKS x REGION_CHUNKS block of horizontal chunks. Here cx/cy are the
+# horizontal axes and cz is vertical, so every vertical layer of a column lands
+# in the same region file.
+REGION_SHIFT = 5
+REGION_CHUNKS = 1 << REGION_SHIFT
+
+# Cap on region files held open while streaming. A world wide enough to exceed
+# this reopens in append mode instead of running the process out of handles.
+MAX_OPEN_REGION_FILES = 32
+
+# GMAD's addon whitelist rejects .mcb and .dat, so both lanes ship as .json even
+# though the fast lane is opaque MCB4 binary. The plain r.X.Y.json name goes to
+# the fast lane because it carries virtually all of the data; the sparse
+# side-data lane takes the qualified name.
+REGION_FAST_SUFFIX = ".json"
+REGION_SIDE_SUFFIX = ".side.json"
+
+
+def region_coords(cx: int, cy: int) -> tuple[int, int]:
+    return int(cx) >> REGION_SHIFT, int(cy) >> REGION_SHIFT
+
+
+def region_part_name(rx: int, ry: int, suffix: str) -> str:
+    return f"r.{int(rx)}.{int(ry)}{suffix}"
+
+
+def _mcb4_palette_bits(count: int) -> int:
+    if count <= 1:
+        return 1
+    return max(1, (count - 1).bit_length())
+
+
+def _mcb4_sparse_cells(cells: Any) -> list[tuple[int, int]]:
+    out: list[tuple[int, int]] = []
+    if isinstance(cells, str):
+        for item in cells.split(";"):
+            if not item:
+                continue
+            fields = item.split(":")
+            if len(fields) != 2:
+                raise ValueError(f"invalid sparse cell: {item!r}")
+            out.append((int(fields[0]), int(fields[1])))
+    elif isinstance(cells, list):
+        if len(cells) % 2:
+            raise ValueError("sparse cell array has an odd length")
+        for index in range(0, len(cells), 2):
+            out.append((int(cells[index]), int(cells[index + 1])))
+    elif cells not in (None, ""):
+        raise ValueError("invalid sparse cell payload")
+    return out
+
+
+def _mcb4_has_side_data(record: Any) -> bool:
+    if not isinstance(record, list) or len(record) < 4:
+        raise ValueError("invalid chunk record")
+    for side in record[4:]:
+        if side is None:
+            continue
+        if isinstance(side, (list, tuple, dict, str, bytes)) and len(side) == 0:
+            continue
+        return True
+    return False
+
+
+def encode_mcb4_fragment(record: Any, palette: list[Any], chunk_height: int = CH) -> bytes | None:
+    """Encode a state-only chunk; side-data chunks stay on the JSON path."""
+    if not isinstance(record, list) or len(record) < 4:
+        raise ValueError("invalid chunk record")
+    if _mcb4_has_side_data(record):
+        return None
+    chunk_height = int(chunk_height or CH)
+    if chunk_height <= 0 or chunk_height % 16:
+        raise ValueError(f"MCB4 chunk height must be a positive multiple of 16: {chunk_height}")
+    if len(palette) > 0xFFFF:
+        raise ValueError("MCB4 global palette exceeds u16 index space")
+
+    cx, cy, cz = (int(record[index]) for index in range(3))
+    cells = _mcb4_sparse_cells(record[3])
+    if len(cells) > 0xFFFF:
+        raise ValueError("MCB4 chunk cell count exceeds u16 index space")
+    cells.sort(key=lambda pair: pair[0])
+    sections: dict[int, list[tuple[int, int]]] = {}
+    seen: set[int] = set()
+    for local_index, palette_index in cells:
+        if local_index < 0 or local_index >= CS * CS * chunk_height:
+            raise ValueError(f"MCB4 local index out of range: {local_index}")
+        if local_index in seen:
+            raise ValueError(f"MCB4 duplicate local index: {local_index}")
+        if palette_index < 0 or palette_index >= len(palette):
+            raise ValueError(f"MCB4 palette index out of range: {palette_index}")
+        seen.add(local_index)
+        section_y, section_index = divmod(local_index, 4096)
+        sections.setdefault(section_y, []).append((section_index, palette_index))
+
+    out = bytearray(struct.pack("<iiiHH", cx, cy, cz, len(cells), len(sections)))
+    for section_y in sorted(sections):
+        section_cells = sections[section_y]
+        local_palette: list[int] = []
+        local_indexes: dict[int, int] = {}
+        for _, global_index in section_cells:
+            if global_index not in local_indexes:
+                local_indexes[global_index] = len(local_palette)
+                local_palette.append(global_index)
+        bits = _mcb4_palette_bits(len(local_palette))
+        out.extend(struct.pack("<HHHB", section_y, len(section_cells), len(local_palette), bits))
+        for global_index in local_palette:
+            out.extend(struct.pack("<H", global_index))
+        occupancy = bytearray(512)
+        for section_index, _ in section_cells:
+            occupancy[section_index >> 3] |= 1 << (section_index & 7)
+        out.extend(occupancy)
+        stream = bytearray((len(section_cells) * bits + 7) // 8)
+        bit_offset = 0
+        for _, global_index in section_cells:
+            local_index = local_indexes[global_index]
+            for bit_index in range(bits):
+                if (local_index >> bit_index) & 1:
+                    stream[(bit_offset + bit_index) >> 3] |= 1 << ((bit_offset + bit_index) & 7)
+            bit_offset += bits
+        out.extend(stream)
+    return bytes(out)
+
+
 def write_gmod_save_streaming(
     save_path: pathlib.Path,
     save_fields: dict[str, Any],
@@ -1472,69 +1610,133 @@ def write_gmod_save_streaming(
     stats: dict[str, Any],
     max_part_json_bytes: int = DEFAULT_SAVE_PART_JSON_BYTES,
 ) -> list[pathlib.Path]:
+    # max_part_json_bytes is accepted for call-site compatibility with the v5/v7
+    # writers; region sharding ignores it (see the regions loop below).
+    del max_part_json_bytes
     save_path.parent.mkdir(parents=True, exist_ok=True)
     slot_name = gmod_save_slot_name(str(save_fields.get("slotName") or save_path.stem)) or save_path.stem
     map_name = str(save_fields.get("map") or "unknown")
     saved_at = int(save_fields.get("savedAt") or time.time())
     block_size = float(save_fields.get("bs") or BS)
     chunk_height = int(save_fields.get("h") or CH)
-    max_part_json_bytes = max(1024, int(max_part_json_bytes or DEFAULT_SAVE_PART_JSON_BYTES))
 
-    part_dir = save_path.with_name(save_path.stem + "_parts")
+    part_dir = save_path.parent / "regions"
     if part_dir.exists():
         shutil.rmtree(part_dir)
     part_dir.mkdir(parents=True, exist_ok=True)
 
     written_parts: list[pathlib.Path] = []
     part_entries: list[dict[str, Any]] = []
-    chunk_index: dict[str, dict[str, int]] = {}
-    part_chunks: list[Any] = []
-    part_bytes = 96
-    artifact_version = int(save_fields.get("v") or 8)
+    chunk_index: dict[str, dict[str, Any]] = {}
+    artifact_version = max(int(save_fields.get("v") or 0), PHASE5_FORMAT_VERSION)
 
-    def flush_part() -> None:
-        nonlocal part_chunks, part_bytes
-        if not part_chunks:
-            return
-        part_no = len(written_parts) + 1
-        part_name = f"part_{part_no:05d}.json"
-        part_path = part_dir / part_name
-        part_data = {
-            "v": artifact_version,
-            "h": chunk_height,
-            "chunks": part_chunks,
-        }
-        write_gmod_json(part_path, part_data)
-        part_entries.append({
-            "path": f"{save_path.stem}_parts/{part_name}",
-            "chunks": len(part_chunks),
-        })
-        written_parts.append(part_path)
-        part_chunks = []
-        part_bytes = 96
+    # Chunks are sharded by region rather than packed into size-budgeted parts:
+    # the runtime reads MCB4 fragments through a seek+read range, so file size
+    # costs nothing while spatial locality means one player area touches one
+    # file. max_part_json_bytes therefore no longer influences the split.
+    #
+    # `chunks` is a generator over the whole world, so fragments are appended to
+    # their region file as they arrive instead of being collected first: only
+    # the chunk index, the sparse side-data records, and one fragment are ever
+    # held at once. Open handles are capped because a large world has far more
+    # regions than a process should keep open.
+    regions: dict[tuple[int, int], dict[str, Any]] = {}
+    open_regions: list[tuple[int, int]] = []
+
+    def region_state(region: tuple[int, int]) -> dict[str, Any]:
+        state = regions.get(region)
+        if state is None:
+            name = region_part_name(region[0], region[1], REGION_FAST_SUFFIX)
+            state = {
+                "fastName": name,
+                "fastPath": part_dir / name,
+                "fastBytes": 0,
+                "handle": None,
+                "sideChunks": [],
+            }
+            regions[region] = state
+        return state
+
+    def region_handle(region: tuple[int, int], state: dict[str, Any]):
+        handle = state["handle"]
+        if handle is not None:
+            open_regions.remove(region)
+            open_regions.append(region)
+            return handle
+        # Append on reopen so an evicted region is never truncated.
+        handle = state["fastPath"].open("ab" if state["fastBytes"] else "wb")
+        state["handle"] = handle
+        open_regions.append(region)
+        while len(open_regions) > MAX_OPEN_REGION_FILES:
+            evicted = regions[open_regions.pop(0)]
+            evicted["handle"].close()
+            evicted["handle"] = None
+        return handle
 
     for chunk in chunks:
         if not isinstance(chunk, list) or len(chunk) < 4:
             continue
-        chunk_json = json.dumps(chunk, ensure_ascii=False, separators=(",", ":"))
-        chunk_json_bytes = len(chunk_json.encode("utf-8"))
-        if part_chunks and part_bytes + chunk_json_bytes + 1 > max_part_json_bytes:
-            flush_part()
-        part_no = len(written_parts) + 1
-        index_in_part = len(part_chunks) + 1
         cx, cy, cz = int(chunk[0]), int(chunk[1]), int(chunk[2])
-        chunk_index[chunk_key_text(cx, cy, cz)] = {
-            "part": part_no,
-            "index": index_in_part,
-        }
-        part_chunks.append(chunk)
-        part_bytes += chunk_json_bytes + 1
-    flush_part()
+        region = region_coords(cx, cy)
+        state = region_state(region)
+        fragment = encode_mcb4_fragment(chunk, palette, chunk_height)
+        # `region` is resolved to a part index once every region is known.
+        entry: dict[str, Any] = {"region": region}
+        if fragment is not None:
+            region_handle(region, state).write(fragment)
+            entry["fastOffset"] = state["fastBytes"]
+            entry["fastBytes"] = len(fragment)
+            state["fastBytes"] += len(fragment)
+        else:
+            state["sideChunks"].append(chunk)
+            entry["index"] = len(state["sideChunks"])
+            stats["fallbackChunks"] = int(stats.get("fallbackChunks") or 0) + 1
+        chunk_index[chunk_key_text(cx, cy, cz)] = entry
+
+    for state in regions.values():
+        if state["handle"] is not None:
+            state["handle"].close()
+            state["handle"] = None
+
+    part_numbers: dict[tuple[int, int], int] = {}
+    for region in sorted(regions):
+        state = regions[region]
+        part_numbers[region] = len(part_entries) + 1
+        part_entry: dict[str, Any] = {"region": [region[0], region[1]]}
+        if state["fastBytes"]:
+            part_entry.update({
+                "fastPath": f"regions/{state['fastName']}",
+                "fastFormat": "MCB4",
+                "fastBytes": state["fastBytes"],
+            })
+            written_parts.append(state["fastPath"])
+        if state["sideChunks"]:
+            side_name = region_part_name(region[0], region[1], REGION_SIDE_SUFFIX)
+            side_path = part_dir / side_name
+            write_gmod_json(side_path, {
+                "v": artifact_version,
+                "h": chunk_height,
+                "chunks": state["sideChunks"],
+            })
+            part_entry.update({
+                "path": f"regions/{side_name}",
+                "chunks": len(state["sideChunks"]),
+            })
+            written_parts.append(side_path)
+        part_entries.append(part_entry)
+
+    for entry in chunk_index.values():
+        entry["part"] = part_numbers[entry.pop("region")]
     finalize_stream_bundle_metadata(save_fields, stats)
 
     manifest_stats = dict(stats)
     manifest_stats["parts"] = len(part_entries)
+    manifest_stats["fastParts"] = sum(1 for entry in part_entries if entry.get("fastFormat") == "MCB4")
+    manifest_stats["fastBytes"] = sum(int(entry.get("fastBytes") or 0) for entry in part_entries)
+    manifest_stats["fastChunks"] = sum(1 for entry in chunk_index.values() if "fastOffset" in entry)
+    manifest_stats["fallbackChunks"] = sum(1 for entry in chunk_index.values() if "fastOffset" not in entry)
     manifest_stats["chunks"] = int(manifest_stats.get("chunks") or len(chunk_index))
+    manifest_stats["regions"] = len(part_entries)
     manifest = {
         "v": artifact_version,
         "map": map_name,
@@ -1547,7 +1749,9 @@ def write_gmod_save_streaming(
         "p": palette,
         "parts": part_entries,
         "chunkIndex": chunk_index,
-        "editOverlay": f"{save_path.stem}_edits.dat",
+        "regionChunks": REGION_CHUNKS,
+        "fastFormat": "MCB4" if manifest_stats["fastChunks"] else None,
+        "editOverlay": "edits.json",
         "stats": manifest_stats,
     }
     source = save_fields.get("source")
@@ -1856,6 +2060,8 @@ def stream_world_to_gmod_save(
             "sectionHeight": 16,
         },
     }
+    if getattr(args, "allow_mixed_data_versions", False):
+        save_fields["_allowMixedDataVersions"] = True
     chunks = iter_gmod_save_chunks_from_world(args, stats, palette, palette_index, registry)
     if save_format == "streaming":
         written = write_gmod_save_streaming(save_path, save_fields, chunks, palette, stats, max_part_json_bytes)
@@ -1919,58 +2125,79 @@ def write_output(out_path: pathlib.Path, data: dict[str, Any], split_chunks: boo
     return [out_path] + written
 
 
-def default_out_path(world: str) -> pathlib.Path:
+def _output_root() -> pathlib.Path:
     script = pathlib.Path(__file__).resolve()
-    garrysmod = script.parents[3]
+    addon_root = script.parents[1]
+    if (addon_root / "generated" / "reports").is_dir() or (addon_root / "lua" / "mc").is_dir():
+        # A full addon is normally .../garrysmod/addons/mc/_tools/.
+        return addon_root.parents[1]
+    return script.parent.parent
+
+
+def default_out_path(world: str) -> pathlib.Path:
     name = pathlib.Path(world).name or "world"
-    return garrysmod / "data" / "mc_import" / f"{name}.json"
+    return _output_root() / "data" / "mc_import" / f"{name}.json"
 
 
 def default_save_path(slot_name: str) -> pathlib.Path:
-    script = pathlib.Path(__file__).resolve()
-    garrysmod = script.parents[3]
-    return garrysmod / "data" / "mc" / "saves" / f"{slot_name}.dat"
+    return _output_root() / "data" / "mc" / "saves" / slot_name / "manifest.json"
+
+
+def region_manifest_path(path: pathlib.Path) -> pathlib.Path:
+    if path.name.lower() == "manifest.json":
+        return path
+    if path.suffix:
+        return path.parent / path.stem / "manifest.json"
+    return path / "manifest.json"
 
 
 def default_gmod_map() -> str:
-    script = pathlib.Path(__file__).resolve()
-    save_dir = script.parents[3] / "data" / "mc"
+    save_dir = _output_root() / "data" / "mc"
+    for manifest_path in sorted(save_dir.glob("saves/*/manifest.json")):
+        try:
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
+            continue
+        map_name = str(manifest.get("map") or "").strip()
+        if map_name:
+            return map_name
     maps = sorted(p.stem for p in save_dir.glob("*.dat") if p.is_file())
     return maps[0] if maps else "gm_flatgrass"
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Export a Java Edition Minecraft world region to GMod MC import JSON")
-    p.add_argument("--world", required=True, help="Java world-save directory, e.g. E:\\mc\\.minecraft\\saves\\World")
-    p.add_argument("--dimension", default="overworld", help="Dimension: overworld/the_nether/the_end (default: overworld)")
-    p.add_argument("--out", help="Output JSON path (default: garrysmod/data/mc_import/<world-name>.json)")
-    p.add_argument("--from", dest="from_pos", nargs=3, type=int, metavar=("X", "Y", "Z"), help="Starting MC coordinates")
-    p.add_argument("--to", dest="to_pos", nargs=3, type=int, metavar=("X", "Y", "Z"), help="Ending MC coordinates")
-    p.add_argument("--from-chunk", nargs=2, type=int, metavar=("CX", "CZ"), help="Starting MC chunk coordinates (inclusive)")
-    p.add_argument("--to-chunk", nargs=2, type=int, metavar=("CX", "CZ"), help="Ending MC chunk coordinates (inclusive)")
-    p.add_argument("--y-range", nargs=2, type=int, default=(-64, 319), metavar=("MINY", "MAXY"), help="MC Y range to use with chunk coordinates (default: -64..319)")
-    p.add_argument("--origin", nargs=3, type=int, default=(0, 0, DEFAULT_ORIGIN_Z), metavar=("BX", "BY", "BZ"), help="GMod import origin (default: 0 0 0)")
-    p.add_argument("--keep-coords", action="store_true", help="Keep MC x/-z/y as GMod bx/by/bz instead of offsetting them to origin")
-    p.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS, help="Maximum number of blocks to export offline; 0 means unlimited")
+    p = argparse.ArgumentParser(description="Export a Java Minecraft world region to a GMod MC import JSON bundle")
+    p.add_argument("--world", required=True, help="Java world directory, for example C:\\Minecraft\\saves\\World")
+    p.add_argument("--dimension", default="overworld", help="Dimension: overworld, the_nether, or the_end")
+    p.add_argument("--out", help="Output JSON; defaults to data/mc_import/<world-name>.json")
+    p.add_argument("--from", dest="from_pos", nargs=3, type=int, metavar=("X", "Y", "Z"), help="First Minecraft block coordinate")
+    p.add_argument("--to", dest="to_pos", nargs=3, type=int, metavar=("X", "Y", "Z"), help="Last Minecraft block coordinate")
+    p.add_argument("--from-chunk", nargs=2, type=int, metavar=("CX", "CZ"), help="First Minecraft chunk coordinate (inclusive)")
+    p.add_argument("--to-chunk", nargs=2, type=int, metavar=("CX", "CZ"), help="Last Minecraft chunk coordinate (inclusive)")
+    p.add_argument("--y-range", nargs=2, type=int, default=(-64, 319), metavar=("MINY", "MAXY"), help="Minecraft Y range for chunk selection; default: -64..319")
+    p.add_argument("--origin", nargs=3, type=int, default=(0, 0, DEFAULT_ORIGIN_Z), metavar=("BX", "BY", "BZ"), help="GMod destination origin; default: 0 0 0")
+    p.add_argument("--keep-coords", action="store_true", help="Keep Minecraft coordinates and add the origin offset")
+    p.add_argument("--max-blocks", type=int, default=DEFAULT_MAX_BLOCKS, help="Maximum non-air blocks to export; 0 means unlimited")
     p.add_argument("--allow-data-version", action="append", type=int, default=[], help="Deprecated compatibility option; supported source DataVersions are detected automatically")
+    p.add_argument("--replace-invalid-nbt-utf8", action="store_true", help="replace malformed NBT UTF-8 strings instead of aborting")
     p.add_argument("--split-chunks", action=argparse.BooleanOptionalAction, default=True, help="write one small JSON per GMod chunk plus a manifest")
-    p.add_argument("--save-name", help="Also write data/mc/saves/<name>.dat for mc_save_manager to read")
-    p.add_argument("--save-out", help="Output path for the GMod save .dat; also writes same-named .json metadata")
-    p.add_argument("--save-map", help="GMod map name written to save metadata; defaults to the map name in an existing data/mc/*.dat or gm_flatgrass")
-    p.add_argument("--block-size", type=float, default=BS, help="MC.BS value written to the save (default: 36.5)")
-    p.add_argument("--saved-at", type=int, help="Unix timestamp written to the save (default: current time)")
+    p.add_argument("--save-name", help="Write data/mc/saves/<name>/manifest.json for mc_save_manager")
+    p.add_argument("--save-out", help="GMod save output path; streaming MCB4 uses <path>/manifest.json")
+    p.add_argument("--save-map", help="GMod map name in save metadata; defaults to an existing save or gm_flatgrass")
+    p.add_argument("--block-size", type=float, default=BS, help="MC.BS value written to the save; default: 36.5")
+    p.add_argument("--saved-at", type=int, help="Unix timestamp written to the save; default: current time")
     p.add_argument("--save-format", choices=("auto", "classic", "chunked", "streaming"), default="auto", help="GMod save format: auto/classic/chunked/streaming")
-    p.add_argument("--save-part-json-bytes", type=int, default=DEFAULT_SAVE_PART_JSON_BYTES, help="Target maximum uncompressed JSON size per sharded save part (default: 4 MiB)")
+    p.add_argument("--save-part-json-bytes", type=int, default=DEFAULT_SAVE_PART_JSON_BYTES, help="Target uncompressed JSON size per save part; default: 4 MiB")
     args = p.parse_args(argv)
 
     if args.from_chunk or args.to_chunk:
         if not args.from_chunk or not args.to_chunk:
-            p.error("--from-chunk and --to-chunk must be used together")
+            p.error("--from-chunk and --to-chunk must be provided together")
         lo, hi = chunk_box(args.from_chunk, args.to_chunk, args.y_range)
         args.from_pos = lo
         args.to_pos = hi
     elif not args.from_pos or not args.to_pos:
-        p.error("use either --from/--to or --from-chunk/--to-chunk")
+        p.error("provide either --from/--to or --from-chunk/--to-chunk")
 
     if args.save_name:
         args.save_name = gmod_save_slot_name(args.save_name)
@@ -1979,12 +2206,14 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     if args.save_out and not args.save_name:
         args.save_name = gmod_save_slot_name(pathlib.Path(args.save_out).stem)
         if not args.save_name:
-            p.error("the --save-out filename cannot be converted into a valid save name")
+            p.error("--save-out filename cannot be converted into a valid save name")
     return args
 
 
 def main(argv: list[str]) -> int:
+    global ALLOW_INVALID_NBT_UTF8
     args = parse_args(argv)
+    ALLOW_INVALID_NBT_UTF8 = bool(args.replace_invalid_nbt_utf8)
     written: list[pathlib.Path] = []
     save_written: list[pathlib.Path] = []
 
@@ -2000,6 +2229,8 @@ def main(argv: list[str]) -> int:
         save_path = pathlib.Path(args.save_out) if args.save_out else default_save_path(slot_name)
         map_name = args.save_map or default_gmod_map()
         save_format = choose_save_format(args, write_json)
+        if save_format == "streaming":
+            save_path = region_manifest_path(save_path)
         if not write_json and can_stream_gmod_save(args) and save_format in ("chunked", "streaming"):
             stats, save_written = stream_world_to_gmod_save(
                 args,
@@ -2053,20 +2284,20 @@ def main(argv: list[str]) -> int:
         written = write_output(out_path, data, args.split_chunks)
 
     if written:
-        print(f"[MC import] JSON 输出: {out_path}")
-    print(f"[MC import] 方块: {stats['blocks']}  GMod chunks: {stats['chunks']}  MC chunks: {stats['scannedMcChunks']}")
-    print(f"[MC import] 唯一方块: {stats['uniqueBlocks']}  clipped={stats['clippedByMaxBlocks']}")
+        print(f"[MC import] JSON output: {out_path}")
+    print(f"[MC import] blocks: {stats['blocks']}  GMod chunks: {stats['chunks']}  MC chunks: {stats['scannedMcChunks']}")
+    print(f"[MC import] unique blocks: {stats['uniqueBlocks']}  clipped={stats['clippedByMaxBlocks']}")
     observed_versions = stats.get("observedDataVersions") or []
     if observed_versions:
-        print("[MC import] 自动检测 DataVersion: " + ", ".join(str(version) for version in observed_versions))
+        print("[MC import] detected DataVersion: " + ", ".join(str(version) for version in observed_versions))
     if len(written) > 1:
         print(f"[MC import] parts: {len(written) - 1}")
     if save_written:
         print(f"[MC import] GMod save: {save_written[0]}")
         print(f"[MC import] GMod save meta: {save_written[1]}")
-        print("[MC import] 进服务器后执行: mc_save_manager 或 mc_load_save " + str(args.save_name))
+        print("[MC import] Run mc_save_manager or mc_load_save " + str(args.save_name) + " on the server")
     elif written:
-        print("[MC import] 进服务器后执行: mc_import " + out_path.stem)
+        print("[MC import] Run mc_import " + out_path.stem + " on the server")
     return 0
 
 

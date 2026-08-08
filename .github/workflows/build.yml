@@ -28,12 +28,12 @@ jobs:
           submodules: recursive
       - uses: microsoft/setup-msbuild@v2
 
-      - name: Build (Release ${{ matrix.platform }}, WPO/LTCG on)
+      - name: Build (Release_Final ${{ matrix.platform }}, WPO/LTCG on)
         shell: pwsh
         run: |
           msbuild binary\mcswep_native_mesh\mcswep_native_mesh.vcxproj `
             -target:Rebuild `
-            -property:Configuration=Release `
+            -property:Configuration=Release_Final `
             -property:Platform=${{ matrix.platform }} `
             -property:PlatformToolset=v143 `
             -property:OutDir=$env:GITHUB_WORKSPACE\out\ `

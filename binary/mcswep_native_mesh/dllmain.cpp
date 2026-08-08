@@ -4,6 +4,8 @@
 #include "worldstate.h"
 #include "blockdefs.h"
 #include "meshbuild.h"
+#include "patchdecode.h"
+#include "lightatlas.h"
 
 using namespace GarrysMod::Lua;
 using namespace std;
@@ -79,9 +81,21 @@ GMOD_MODULE_OPEN()
 	fa.AddFunction("RebuildBlockLight", GTLUAF(mcmesh::meshbuild::RebuildBlockLight));
 	fa.AddFunction("StartBlockLightRebuild", GTLUAF(mcmesh::meshbuild::StartBlockLightRebuild));
 	fa.AddFunction("PollBlockLightRebuild", GTLUAF(mcmesh::meshbuild::PollBlockLightRebuild));
+	fa.AddFunction("CancelBlockLightRebuild", GTLUAF(mcmesh::meshbuild::CancelBlockLightRebuild));
 	fa.AddFunction("GetBlockLightChunk", GTLUAF(mcmesh::meshbuild::GetBlockLightChunk));
 	fa.AddFunction("GetSkyLightChunk", GTLUAF(mcmesh::meshbuild::GetSkyLightChunk));
-	fa.AddFunction("GetLightingHalo", GTLUAF(mcmesh::meshbuild::GetLightingHalo));
+	fa.AddFunction("GetChunkLightTile", GTLUAF(mcmesh::meshbuild::GetChunkLightTile));
+	fa.AddFunction("BindLightAtlasMaterial", GTLUAF(mcmesh::lightatlas::BindLightAtlasMaterial));
+	fa.AddFunction("GetLightAtlasStats", GTLUAF(mcmesh::lightatlas::GetLightAtlasStats));
+	fa.AddFunction("GetLightAtlasSlot", GTLUAF(mcmesh::lightatlas::GetLightAtlasSlot));
+	fa.AddFunction("StartCompressedPatchDecode", GTLUAF(mcmesh::patchdecode::StartCompressedPatchDecode));
+	fa.AddFunction("PollCompressedPatchDecode", GTLUAF(mcmesh::patchdecode::PollCompressedPatchDecode));
+	fa.AddFunction("CommitCompressedPatch", GTLUAF(mcmesh::patchdecode::CommitCompressedPatch));
+	fa.AddFunction("StartBinarySectionPatchDecode", GTLUAF(mcmesh::patchdecode::StartBinarySectionPatchDecode));
+	fa.AddFunction("PollBinarySectionPatchDecode", GTLUAF(mcmesh::patchdecode::PollBinarySectionPatchDecode));
+	fa.AddFunction("CommitBinarySectionPatch", GTLUAF(mcmesh::patchdecode::CommitBinarySectionPatch));
+	fa.AddFunction("CancelCompressedPatchDecode", GTLUAF(mcmesh::patchdecode::CancelCompressedPatchDecode));
+	fa.AddFunction("CancelAllCompressedPatchDecodes", GTLUAF(mcmesh::patchdecode::CancelAllCompressedPatchDecodes));
 
 	// ---- 方块静态数据 ----
 	fa.AddFunction("SetBlockDefs", GTLUAF(mcmesh::blockdefs::SetBlockDefs));
@@ -90,10 +104,17 @@ GMOD_MODULE_OPEN()
 	// ---- 建面 / 帧循环 / 绘制(meshbuild; Unload/Clear 先毁 mesh 再转调 worldstate)----
 	fa.AddFunction("Think", GTLUAF(mcmesh::meshbuild::Think));
 	fa.AddFunction("DrawChunk", GTLUAF(mcmesh::meshbuild::DrawChunk));
+	fa.AddFunction("DrawVisible", GTLUAF(mcmesh::meshbuild::DrawVisible));
+	fa.AddFunction("SetChunkVisible", GTLUAF(mcmesh::meshbuild::SetChunkVisible));
 	fa.AddFunction("UnloadChunk", GTLUAF(mcmesh::meshbuild::UnloadChunk));
 	fa.AddFunction("ClearWorld", GTLUAF(mcmesh::meshbuild::ClearWorld));
 	fa.AddFunction("Shutdown", GTLUAF(mcmesh::meshbuild::Shutdown));
 	fa.AddFunction("GetStats", GTLUAF(mcmesh::meshbuild::GetStats));
+	fa.AddFunction("SetProfiling", GTLUAF(mcmesh::meshbuild::SetProfiling));
+	fa.AddFunction("SetSimpleGreedy", GTLUAF(mcmesh::meshbuild::SetSimpleGreedy));
+	fa.AddFunction("SetDirectionalDraw", GTLUAF(mcmesh::meshbuild::SetDirectionalDraw));
+	fa.AddFunction("SetOcclusionCull", GTLUAF(mcmesh::meshbuild::SetOcclusionCull));
+	fa.AddFunction("SetLod", GTLUAF(mcmesh::meshbuild::SetLod));
 
 	// ---- 调试口(正式功能, 不删)----
 	fa.AddFunction("DebugGetCell", GTLUAF(mcmesh::Test::DebugGetCell));
@@ -115,9 +136,11 @@ GMOD_MODULE_CLOSE()
 {
 	// Lua Shutdown hook 不保证在模块卸载前必达；DLL close 是最终线程回收屏障。
 	// 引擎资源必须在线程完全停止后释放，避免 worker 仍持有建面数据。
+	mcmesh::patchdecode::Shutdown();
 	mcmesh::meshbuild::StopWorkers();
 	mcmesh::worldstate::StopBlockLightWorker();
 	mcmesh::Test::DestroyDebugMesh();
 	mcmesh::meshbuild::DestroyAllMeshes();
+	mcmesh::lightatlas::Shutdown();
 	return 0;
 }

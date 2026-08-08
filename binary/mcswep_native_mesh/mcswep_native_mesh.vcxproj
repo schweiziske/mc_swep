@@ -130,7 +130,7 @@
       <ConformanceMode>true</ConformanceMode>
       <PrecompiledHeader>Use</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include\garrysmod_common\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include\rapidjson-master\include;$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -150,13 +150,13 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC32;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeader>Create</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include</AdditionalIncludeDirectories>
-      <Optimization>MaxSpeed</Optimization>
-      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <AdditionalIncludeDirectories>$(ProjectDir)include\rapidjson-master\include;$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include</AdditionalIncludeDirectories>
+      <Optimization>Disabled</Optimization>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -176,11 +176,11 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>WIN32;NDEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC32;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeader>Create</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include\rapidjson-master\include;$(ProjectDir)include\sourcesdk-minimal\public\tier0;$(ProjectDir)include\sourcesdk-minimal\public;$(ProjectDir)include\sourcesdk-minimal;$(ProjectDir)include</AdditionalIncludeDirectories>
       <WholeProgramOptimization>true</WholeProgramOptimization>
     </ClCompile>
     <Link>
@@ -199,9 +199,9 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>_DEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC64;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeader>Create</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
-      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include\garrysmod_common\include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include\rapidjson-master\include;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include</AdditionalIncludeDirectories>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
     </ClCompile>
@@ -221,14 +221,14 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC64;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Use</PrecompiledHeader>
+      <PrecompiledHeader>Create</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include</AdditionalIncludeDirectories>
-      <Optimization>MaxSpeed</Optimization>
+      <AdditionalIncludeDirectories>$(ProjectDir)include\rapidjson-master\include;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include</AdditionalIncludeDirectories>
+      <Optimization>Disabled</Optimization>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
-      <WholeProgramOptimization>true</WholeProgramOptimization>
+      <WholeProgramOptimization>false</WholeProgramOptimization>
     </ClCompile>
     <Link>
       <SubSystem>Windows</SubSystem>
@@ -248,11 +248,14 @@
       <SDLCheck>true</SDLCheck>
       <PreprocessorDefinitions>NDEBUG;MCSWEPNATIVEMESH_EXPORTS;_WINDOWS;_USRDLL;COMPILER_MSVC;COMPILER_MSVC64;RAD_TELEMETRY_DISABLED;_CRT_SECURE_NO_WARNINGS;GMOD_USE_SOURCESDK;%(PreprocessorDefinitions)</PreprocessorDefinitions>
       <ConformanceMode>true</ConformanceMode>
-      <PrecompiledHeader>Use</PrecompiledHeader>
+      <!-- Every translation unit previously tried to create the same PCH.
+           Modern LTCG rejects the resulting duplicate PCH records (C4727).
+           Disabling PCH here changes build time only; /O2 and /GL remain on. -->
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
       <PrecompiledHeaderFile>pch.h</PrecompiledHeaderFile>
       <LanguageStandard>stdcpp17</LanguageStandard>
       <AdditionalOptions>/utf-8 %(AdditionalOptions)</AdditionalOptions>
-      <AdditionalIncludeDirectories>$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include</AdditionalIncludeDirectories>
+      <AdditionalIncludeDirectories>$(ProjectDir)include\rapidjson-master\include;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public\tier0;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch\public;$(ProjectDir)include\sourcesdk-minimal-x86-64-branch;$(ProjectDir)include</AdditionalIncludeDirectories>
       <Optimization>MaxSpeed</Optimization>
       <DebugInformationFormat>ProgramDatabase</DebugInformationFormat>
       <WholeProgramOptimization>true</WholeProgramOptimization>
@@ -268,16 +271,23 @@
     </Link>
   </ItemDefinitionGroup>
   <ItemGroup>
-    <ClCompile Include="pch.cpp">
-      <PrecompiledHeader>Create</PrecompiledHeader>
-    </ClCompile>
     <ClCompile Include="blockdefs.cpp" />
     <ClCompile Include="dllmain.cpp" />
     <ClCompile Include="emitters.cpp" />
     <ClCompile Include="handshake.cpp" />
     <ClCompile Include="imesh_index.cpp" />
+    <ClCompile Include="lightatlas.cpp" />
     <ClCompile Include="meshbuild.cpp" />
     <ClCompile Include="meshworker.cpp" />
+    <ClCompile Include="patchdecode.cpp" />
+    <ClCompile Include="include\sourcesdk-minimal\utils\lzma\C\LzmaDec.c" Condition="'$(Platform)'=='Win32'">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
+    <ClCompile Include="include\sourcesdk-minimal-x86-64-branch\utils\lzma\C\LzmaDec.c" Condition="'$(Platform)'=='x64'">
+      <PrecompiledHeader>NotUsing</PrecompiledHeader>
+      <CompileAs>CompileAsC</CompileAs>
+    </ClCompile>
     <ClCompile Include="test.cpp" />
     <ClCompile Include="worldstate.cpp" />
   </ItemGroup>
@@ -289,6 +299,8 @@
     <ClInclude Include="handshake.h" />
     <ClInclude Include="meshbuild.h" />
     <ClInclude Include="meshworker.h" />
+    <ClInclude Include="lightatlas.h" />
+    <ClInclude Include="patchdecode.h" />
     <ClInclude Include="pch.h" />
     <ClInclude Include="test.h" />
     <ClInclude Include="worldstate.h" />

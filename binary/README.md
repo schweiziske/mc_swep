@@ -2,7 +2,7 @@
 
 A native client-side meshing backend for MCSWEP. The module maintains a mirror of the block world in C++, generates chunk vertices on worker threads, and creates and owns Source `IMesh` objects on Garry's Mod's main thread. The Lua integration passes MCSWEP's state-native world snapshots and static visual definitions to the module, then redirects the existing chunk rendering entry points to the native backend.
 
-Current interface version: **ABI 6**.
+Current interface version: **ABI 7**.
 
 > This repository contains only the native mesh backend, interface documentation, and acceptance tests.
 
@@ -209,7 +209,7 @@ The current rail-corner correction matches Lua: the standard rail models for `so
 
 Current primary boundaries:
 
-- module ABI: 6;
+- module ABI: 7;
 - MCBD: v4;
 - visual extension: v2;
 - chunk snapshot: a 32,768-byte `stateId` array;

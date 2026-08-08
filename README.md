@@ -14,7 +14,7 @@ Place the DLL in:
 GarrysMod/garrysmod/lua/bin/
 ```
 
-DLL downloads are available on the [Releases page](https://github.com/schweiziske/mc_swep/releases/tag/standard).
+DLL downloads are available on the [Releases page](https://github.com/schweiziske/mc_swep/releases/latest).
 
 ## Import Tools
 

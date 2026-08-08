@@ -166,6 +166,7 @@ namespace mcmesh::worldstate {
         return added;
     }
 
+    bool ApplyDenseStates(int cx, int cy, int cz, const uint32_t* states);
     int ApplyChunk(ILuaBase* LUA);
     int CreateChunk(ILuaBase* LUA);
     int ApplyChunkCells(ILuaBase* LUA);
@@ -175,9 +176,10 @@ namespace mcmesh::worldstate {
     int RebuildBlockLight(ILuaBase* LUA);
     int GetBlockLightChunk(ILuaBase* LUA);
     int GetSkyLightChunk(ILuaBase* LUA);
-    int GetLightingHalo(ILuaBase* LUA);
+    int GetChunkLightTile(ILuaBase* LUA);
     int StartBlockLightRebuild(ILuaBase* LUA);
     int PollBlockLightRebuild(ILuaBase* LUA);
+    int CancelBlockLightRebuild(ILuaBase* LUA);
     void StopBlockLightWorker();
     int UnloadChunk(ILuaBase* LUA);
     int ClearWorld(ILuaBase* LUA);

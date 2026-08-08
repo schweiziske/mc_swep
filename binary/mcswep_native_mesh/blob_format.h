@@ -20,7 +20,6 @@
 namespace mcmesh {
 
     // ---------------------------------------------------------------- 常量
-    constexpr int      ABI_VERSION = 0;      // mcmesh.AbiVersion() 返回值
     constexpr uint16_t VERTEX_BLOB_VERSION = 1;
     constexpr char     VERTEX_BLOB_MAGIC[4] = { 'M', 'C', 'V', 'B' };
 

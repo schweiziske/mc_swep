@@ -15,8 +15,16 @@ The importer can either:
 - A Minecraft Java Edition world directory
 - No third-party Python packages are required
 
-The generated block-state report required by the importer is included in
-`tools/data`.
+The importer resolves its generated block-state dependencies from either of
+these layouts, in order:
+
+1. A full addon checkout: `generated/reports/blocks.json` and
+   `lua/mc/generated/sh_generated_block_state_schemas.lua`.
+2. This published tools bundle: `tools/data/blocks.json` and
+   `tools/data/sh_generated_block_state_schemas.lua`.
+
+If the first layout is unavailable, the importer automatically tries the
+second. No third-party Python packages are required for either layout.
 
 ## Supported Minecraft versions
 
@@ -57,9 +65,9 @@ python tools/mc_import_world.py `
 When the repository is installed as a Garry's Mod addon, the default output is:
 
 ```text
-garrysmod/data/mc/saves/imported_world.dat
-garrysmod/data/mc/saves/imported_world.json
-garrysmod/data/mc/saves/imported_world_parts/  (for split save formats)
+garrysmod/data/mc/saves/imported_world/manifest.json
+garrysmod/data/mc/saves/imported_world/meta.json
+garrysmod/data/mc/saves/imported_world/regions/  (for streaming save format)
 ```
 
 Load it in the server console:
@@ -133,11 +141,12 @@ With `--keep-coords`, the original Minecraft coordinates are retained and
 --keep-coords                Retain source coordinates and add the origin offset
 --max-blocks N               Maximum non-air blocks; 0 means unlimited
 --allow-data-version N       Deprecated compatibility option; no longer required
+--replace-invalid-nbt-utf8   Replace malformed NBT UTF-8 instead of aborting
 --out PATH                   Write an mc_import JSON bundle
 --split-chunks               Write a manifest and per-GMod-chunk files (default)
 --no-split-chunks            Write one JSON file
---save-name NAME             Create data/mc/saves/NAME.dat
---save-out PATH              Set the save .dat output path
+--save-name NAME             Create data/mc/saves/NAME/manifest.json
+--save-out PATH              Set the save output path
 --save-map NAME              Map name stored in save metadata
 --block-size NUMBER          Saved MC block size; default: 36.5
 --saved-at UNIX_TIME         Override the save timestamp
@@ -165,7 +174,8 @@ The importer can also look for a custom dimension under
 - `auto`: chooses a suitable format from the selected area.
 - `classic`: one save file, intended for small imports.
 - `chunked`: a manifest plus part files, intended for medium or large imports.
-- `streaming`: indexed lazy-loading storage, intended for very large imports.
+- `streaming`: region-sharded MCB4 storage with an indexed compatibility lane,
+  intended for very large imports.
 
 For efficient chunked or streaming output, select complete Minecraft chunks and
 use an origin aligned to the addon's `16 x 16 x 32` GMod chunk dimensions.

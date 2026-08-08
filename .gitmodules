@@ -6,3 +6,6 @@
 	path = binary/mcswep_native_mesh/include/sourcesdk-minimal-x86-64-branch
 	url = https://github.com/danielga/sourcesdk-minimal.git
 	branch = x86-64-branch
+[submodule "binary/mcswep_native_mesh/include/rapidjson-master"]
+	path = binary/mcswep_native_mesh/include/rapidjson-master
+	url = https://github.com/Tencent/rapidjson.git

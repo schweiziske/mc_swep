@@ -4,6 +4,7 @@
 #include "global.h"
 #include "blob_format.h"
 #include "worldstate.h"
+#include "lightatlas.h"
 #include "blockdefs.h"
 
 #include <deque>
@@ -38,6 +39,18 @@ namespace {
 }
 
 namespace mcmesh::worldstate {
+    int CancelBlockLightRebuild(ILuaBase* LUA) {
+        s_lightCancel.store(true, std::memory_order_release);
+        {
+            std::lock_guard<std::mutex> lock(s_lightMutex);
+            s_lightResult.reset();
+        }
+        s_lightReady.store(false, std::memory_order_release);
+        g_lightFieldReady = false;
+        LUA->PushBool(true);
+        return 1;
+    }
+
     void StopBlockLightWorker() {
         s_lightCancel.store(true, std::memory_order_release);
         if (s_lightThread.joinable()) s_lightThread.join();
@@ -64,6 +77,13 @@ namespace mcmesh::worldstate {
         struct LightChangeCollector {
             std::vector<ChangedLightChunk> chunks;
             std::unordered_map<uint64_t, size_t> byKey;
+            // A chunk becoming valid is an atlas change even when every light
+            // byte stays numerically identical (for example a sealed chunk
+            // whose computed block/sky field is all zero).  Keep this set
+            // separate from the Lua cell diff so the network payload remains
+            // a true value diff while the GPU tile still crosses its validity
+            // barrier.
+            std::unordered_set<uint64_t> atlasKeys;
             uint64_t cellCount = 0;
 
             void Note(uint64_t key, int cx, int cy, int cz, int li) {
@@ -84,6 +104,10 @@ namespace mcmesh::worldstate {
                 chunk.bits[byteIndex] |= bit;
                 ++chunk.count;
                 ++cellCount;
+            }
+
+            void NoteAtlas(uint64_t key) {
+                atlasKeys.insert(key);
             }
         };
 
@@ -293,6 +317,16 @@ namespace mcmesh::worldstate {
         }
 
         void PushChangedLightTable(ILuaBase* LUA,const LightChangeCollector& changed,double ms,const char* status) {
+            // The light diff is not handed to Lua as a deferred atlas job.
+            // Upload every affected allocated tile, including its 27-neighbour
+            // halo, before returning the result table to the caller.
+            std::vector<uint64_t> changedKeys;
+            changedKeys.reserve(changed.chunks.size() + changed.atlasKeys.size());
+            for (const ChangedLightChunk& chunk : changed.chunks)
+                changedKeys.push_back(PackChunkKey(chunk.cx, chunk.cy, chunk.cz));
+            for (uint64_t key : changed.atlasKeys)
+                changedKeys.push_back(key);
+            lightatlas::RefreshChangedChunks(changedKeys);
             LUA->CreateTable();
             LUA->PushString(status);LUA->SetField(-2,"status");
             LUA->PushNumber(ms);LUA->SetField(-2,"ms");
@@ -309,7 +343,7 @@ namespace mcmesh::worldstate {
         }
     }
 
-    static bool ApplyDenseStates(int cx, int cy, int cz, const uint32_t* states) {
+    bool ApplyDenseStates(int cx, int cy, int cz, const uint32_t* states) {
         if (!states) return false;
         for (int li = 0; li < kCellsPerChunk; ++li)
             if (states[li] >= blockdefs::g_states.size()) return false;
@@ -469,6 +503,7 @@ namespace mcmesh::worldstate {
         LightChangeCollector changed;
         double incrementalMS=0;
         if(updateLighting){
+            const bool wasLightValid = current->second->lightValid;
             const double lightT0=Plat_FloatTime();
             const uint8_t oldEmission=LightEmission(oldState),newEmission=LightEmission(state);
             const uint8_t oldOpacity=oldState<blockdefs::g_lightOpacity.size()?blockdefs::g_lightOpacity[oldState]:15;
@@ -504,6 +539,7 @@ namespace mcmesh::worldstate {
                 }
             }
             current->second->lightValid=true;
+            if (!wasLightValid) changed.NoteAtlas(key);
             incrementalMS=(Plat_FloatTime()-lightT0)*1000.0;
             ++g_status.IncrementalLightUpdates;g_status.IncrementalLightCells+=changed.cellCount;
             g_status.IncrementalLightLastMS=incrementalMS;
@@ -583,39 +619,97 @@ namespace mcmesh::worldstate {
         LUA->PushString(reinterpret_cast<const char*>(it->second->skyLight),(unsigned int)sizeof(it->second->skyLight));return 1;
     }
 
-    int GetLightingHalo(ILuaBase* LUA) {
-        int cx=0,cy=0,cz=0;if(!ReadChunkCoords(LUA,cx,cy,cz)){LUA->PushNil();return 1;}
+    // GPU 光照图集 tile 直出。C++ 世界镜像本来就持有 block/sky 光照场,
+    // 所以这里直接把 padded (CS+2)x(CS+2)x(CH+2) 网格压成行内 run 记录,
+    // 一次调用替代 Lua 侧约 11016 次逐 texel 采样(每次约 20 个 Lua 调用
+    // 外加一个 chunkKey 字符串)。DrawRect 数量不变, 消失的是 Lua 开销。
+    //
+    // 打包顺序必须与 cl_mesh_gpu_light_texture.lua 完全一致:
+    //   p  = lx + ly*GXY + lz*GXY*GXY   (lz -> ly -> lx, 每 cell 步进 1)
+    //   px = p % 128, py = p / 128, run 不跨行
+    // 记录格式为定长 4 字节: px, py, len, block | (sky << 4)。
+    //
+    // 缺失邻居必须复刻 Lua 采样器的语义, 否则边界面会出现黑缝或错误亮边。
+    // 对缺失的 (dx,dy,dz) 邻居分两步回退, 全部只查已有的 3x3x3 邻居表:
+    //   1. 先退到同一横向、中心 cz 的邻居 neigh[nx][ny][1], 并把 z 夹到它的
+    //      边缘层。这覆盖"列已加载, 只是到了世界上下边界"的情况: 顶上是
+    //      sky=15 的空气, 底下是 sky=0 的实心, 与 Lua 的 column-top 判定一致。
+    //      纯垂直缺失(dx=dy=0)时这一步就退回中心 chunk 自身。
+    //   2. 若该横向位置在中心 cz 也没有 chunk, 则整列未加载: Lua 的
+    //      SkyExposedAt 对没有 column top 的列返回 exposed, 即 block=0 sky=15。
+    // 两种情况都不需要扫描 column, 邻居到达时该 chunk 会被重新标脏重烘焙。
+    int GetChunkLightTile(ILuaBase* LUA) {
+        int cx=0,cy=0,cz=0;
+        if(!ReadChunkCoords(LUA,cx,cy,cz)){LUA->PushNil();return 1;}
+        if(g_world.find(PackChunkKey(cx,cy,cz))==g_world.end()){LUA->PushNil();return 1;}
+
         const int CS=g_promise.CS,CH=g_promise.CH;
         if(CS<=0||CH<=0){LUA->PushNil();return 1;}
-        const int GX=CS+2,GZ=CH+2;
-        ChunkMirror* mirrors[27]={};
+        const int GXY=CS+2,GZ=CH+2,CS2=CS*CS;
+        constexpr int kTileWidth=128;   // 与 Lua 侧 TILE 常量绑定
+        const long long cells=(long long)GXY*GXY*GZ;
+        // px/py/len 各占一个字节: 行宽和总行数都必须落在 0..255 内
+        if(cells<=0||kTileWidth>255||(cells-1)/kTileWidth>255){LUA->PushNil();return 1;}
+
+        const ChunkMirror* neigh[3][3][3];
         for(int dz=-1;dz<=1;++dz)for(int dy=-1;dy<=1;++dy)for(int dx=-1;dx<=1;++dx){
             const auto it=g_world.find(PackChunkKey(cx+dx,cy+dy,cz+dz));
-            mirrors[(dx+1)+(dy+1)*3+(dz+1)*9]=(it==g_world.end())?nullptr:it->second.get();
+            neigh[dx+1][dy+1][dz+1]=it==g_world.end()?nullptr:it->second.get();
         }
-        static std::vector<uint8_t> buffer;
-        buffer.resize(size_t(GX)*GX*GZ*2);
-        size_t o=0;
-        for(int lz=-1;lz<=CH;++lz){
-            const int dz=lz<0?-1:(lz>=CH?1:0);const int nlz=lz-dz*CH;
-            for(int ly=-1;ly<=CS;++ly){
-                const int dy=ly<0?-1:(ly>=CS?1:0);const int nly=ly-dy*CS;
-                const int mBase=(dy+1)*3+(dz+1)*9;
-                for(int lx=-1;lx<=CS;++lx){
-                    const int dx=lx<0?-1:(lx>=CS?1:0);
-                    ChunkMirror* m=mirrors[(dx+1)+mBase];
-                    if(m){
-                        const int li=(lx-dx*CS)+nly*CS+nlz*CS*CS;
-                        buffer[o++]=m->blockLight[li];
-                        buffer[o++]=m->skyLight[li];
-                    } else {
-                        buffer[o++]=0;
-                        buffer[o++]=255;
+
+        // 典型地形是长同色段(空旷天光/全暗内部), 实测约 87 个 run;
+        // 但棋盘状光照最坏可退化到每 cell 一个 run。直接按最坏情况预留,
+        // 避免逐帧烘焙时反复 realloc(4 字节 * 11016 ≈ 43KB, 一次性)。
+        std::vector<uint8_t> out;
+        out.reserve(size_t(cells)*4);
+        int runPx=0,runPy=0,runLen=0,px=0,py=0;
+        uint8_t runV=0;
+        auto flush=[&](){
+            if(runLen<=0)return;
+            out.push_back((uint8_t)runPx);out.push_back((uint8_t)runPy);
+            out.push_back((uint8_t)runLen);out.push_back(runV);
+            runLen=0;
+        };
+        auto push=[&](uint8_t v){
+            // px 每 cell 步进 1 并在行宽处回绕, 所以同一 py 即同一行,
+            // run 天然不会跨行。
+            if(runLen>0&&py==runPy&&v==runV)++runLen;
+            else{flush();runPx=px;runPy=py;runV=v;runLen=1;}
+            if(++px>=kTileWidth){px=0;++py;}
+        };
+
+        for(int lz=0;lz<GZ;++lz){
+            const int nz=(lz==0)?0:((lz==GZ-1)?2:1);
+            const int nlz=(lz==0)?(CH-1):((lz==GZ-1)?0:(lz-1));
+            const int slz=(lz==0)?0:((lz==GZ-1)?(CH-1):(lz-1));
+            for(int ly=0;ly<GXY;++ly){
+                const int ny=(ly==0)?0:((ly==GXY-1)?2:1);
+                const int nly=(ly==0)?(CS-1):((ly==GXY-1)?0:(ly-1));
+                for(int lx=0;lx<GXY;++lx){
+                    const int nx=(lx==0)?0:((lx==GXY-1)?2:1);
+                    const ChunkMirror* src=neigh[nx][ny][nz];
+                    int li;
+                    if(src){
+                        const int nlx=(lx==0)?(CS-1):((lx==GXY-1)?0:(lx-1));
+                        li=nlx+nly*CS+nlz*CS2;
                     }
+                    else if((src=neigh[nx][ny][1])!=nullptr){
+                        // 该横向位置存在(至少中心 cz 有), 只是这一层缺失:
+                        // clamp 到它的边缘 z 层。
+                        const int nlx=(lx==0)?(CS-1):((lx==GXY-1)?0:(lx-1));
+                        li=nlx+nly*CS+slz*CS2;
+                    }
+                    else{
+                        push((uint8_t)(0|(15<<4)));   // 整列未加载: 隐式全天光
+                        continue;
+                    }
+                    push((uint8_t)((src->blockLight[li]&15)|((src->skyLight[li]&15)<<4)));
                 }
             }
         }
-        LUA->PushString(reinterpret_cast<const char*>(buffer.data()),(unsigned int)buffer.size());
+        flush();
+        if(out.empty()){LUA->PushNil();return 1;}
+        LUA->PushString(reinterpret_cast<const char*>(out.data()),(unsigned int)out.size());
         return 1;
     }
 
@@ -642,13 +736,20 @@ namespace mcmesh::worldstate {
 #ifdef _WIN32
             SetThreadPriority(GetCurrentThread(),THREAD_PRIORITY_BELOW_NORMAL);
 #endif
+            const auto cancelled=[](){return s_lightCancel.load(std::memory_order_acquire);};
+            const auto stopCancelled=[](){s_lightRunning.store(false,std::memory_order_release);};
             const double t0=Plat_FloatTime();
             struct Node{size_t chunk;int li;uint8_t level;};
             std::deque<Node> queue;
             std::unordered_map<uint64_t,size_t> byKey;byKey.reserve(work->chunks.size()*2+1);
-            for(size_t i=0;i<work->chunks.size();++i)byKey.emplace(work->chunks[i].key,i);
+            for(size_t i=0;i<work->chunks.size();++i){
+                if(cancelled()){stopCancelled();return;}
+                byKey.emplace(work->chunks[i].key,i);
+            }
             for(size_t ci=0;ci<work->chunks.size();++ci){auto& chunk=work->chunks[ci];
+                if(cancelled()){stopCancelled();return;}
                 for(int li=0;li<kCellsPerChunk;++li){const uint32_t state=chunk.states[li];
+                    if((li&255)==0&&cancelled()){stopCancelled();return;}
                     if(state>=emission.size())continue;const uint8_t level=emission[state];if(!level)continue;
                     chunk.light[li]=level;queue.push_back({ci,li,level});++work->sources;}}
             static constexpr int off[6][3]={{1,0,0},{-1,0,0},{0,1,0},{0,-1,0},{0,0,1},{0,0,-1}};
@@ -666,25 +767,36 @@ namespace mcmesh::worldstate {
                     const int cost=op>=15?16:(op>1?(int)op:1),next=(int)node.level-cost;
                     if(next<=0||neighbor.light[nli]>=next)continue;neighbor.light[nli]=(uint8_t)next;++work->written;
                     queue.push_back({found->second,nli,(uint8_t)next});}}
+            if(cancelled()){stopCancelled();return;}
             const double skyStart=Plat_FloatTime();
             struct ColumnKey { int x,y; bool operator==(const ColumnKey& o)const{return x==o.x&&y==o.y;} };
             struct ColumnHash { size_t operator()(const ColumnKey& k)const{return (size_t(uint32_t(k.x))*0x9E3779B185EBCA87ull)^size_t(uint32_t(k.y));} };
             std::unordered_map<ColumnKey,int,ColumnHash> tops;tops.reserve(work->chunks.size()*g_promise.CS*g_promise.CS);
-            for(const auto& chunk:work->chunks)for(int li=0;li<kCellsPerChunk;++li){const uint32_t state=chunk.states[li];
-                if(state>=opacity.size()||opacity[state]<15)continue;const int lx=li%g_promise.CS,ly=(li/g_promise.CS)%g_promise.CS,lz=li/(g_promise.CS*g_promise.CS);
-                const ColumnKey ck{chunk.cx*g_promise.CS+lx,chunk.cy*g_promise.CS+ly};const int wz=chunk.cz*g_promise.CH+lz;
-                const auto old=tops.find(ck);if(old==tops.end()||wz>old->second)tops[ck]=wz;}
+            for(const auto& chunk:work->chunks){
+                if(cancelled()){stopCancelled();return;}
+                for(int li=0;li<kCellsPerChunk;++li){const uint32_t state=chunk.states[li];
+                    if((li&255)==0&&cancelled()){stopCancelled();return;}
+                    if(state>=opacity.size()||opacity[state]<15)continue;const int lx=li%g_promise.CS,ly=(li/g_promise.CS)%g_promise.CS,lz=li/(g_promise.CS*g_promise.CS);
+                    const ColumnKey ck{chunk.cx*g_promise.CS+lx,chunk.cy*g_promise.CS+ly};const int wz=chunk.cz*g_promise.CH+lz;
+                    const auto old=tops.find(ck);if(old==tops.end()||wz>old->second)tops[ck]=wz;
+                }
+            }
             auto exposed=[&tops](int wx,int wy,int wz){const auto it=tops.find({wx,wy});return it==tops.end()||wz>it->second;};
             std::deque<Node> skyQueue;
             static constexpr int lateral[4][2]={{1,0},{-1,0},{0,1},{0,-1}};
-            for(size_t ci=0;ci<work->chunks.size();++ci){auto& chunk=work->chunks[ci];for(int li=0;li<kCellsPerChunk;++li){
-                const int lx=li%g_promise.CS,ly=(li/g_promise.CS)%g_promise.CS,lz=li/(g_promise.CS*g_promise.CS);
-                const int wx=chunk.cx*g_promise.CS+lx,wy=chunk.cy*g_promise.CS+ly,wz=chunk.cz*g_promise.CH+lz;
-                if(exposed(wx,wy,wz)){chunk.sky[li]=15;continue;}
-                uint8_t level=0;const uint32_t state=chunk.states[li];const uint8_t op=state<opacity.size()?opacity[state]:15;
-                const int cost=op>=15?16:(op>1?(int)op:1);
-                for(const auto& d:lateral)if(exposed(wx+d[0],wy+d[1],wz)){const int candidate=15-cost;if(candidate>level)level=(uint8_t)candidate;}
-                if(level){chunk.sky[li]=level;skyQueue.push_back({ci,li,level});++work->skySources;}}}
+            for(size_t ci=0;ci<work->chunks.size();++ci){auto& chunk=work->chunks[ci];
+                if(cancelled()){stopCancelled();return;}
+                for(int li=0;li<kCellsPerChunk;++li){
+                    if((li&255)==0&&cancelled()){stopCancelled();return;}
+                    const int lx=li%g_promise.CS,ly=(li/g_promise.CS)%g_promise.CS,lz=li/(g_promise.CS*g_promise.CS);
+                    const int wx=chunk.cx*g_promise.CS+lx,wy=chunk.cy*g_promise.CS+ly,wz=chunk.cz*g_promise.CH+lz;
+                    if(exposed(wx,wy,wz)){chunk.sky[li]=15;continue;}
+                    uint8_t level=0;const uint32_t state=chunk.states[li];const uint8_t op=state<opacity.size()?opacity[state]:15;
+                    const int cost=op>=15?16:(op>1?(int)op:1);
+                    for(const auto& d:lateral)if(exposed(wx+d[0],wy+d[1],wz)){const int candidate=15-cost;if(candidate>level)level=(uint8_t)candidate;}
+                    if(level){chunk.sky[li]=level;skyQueue.push_back({ci,li,level});++work->skySources;}
+                }
+            }
             while(!skyQueue.empty()&&!s_lightCancel.load(std::memory_order_acquire)){
                 const Node node=skyQueue.front();skyQueue.pop_front();++work->skyProcessed;auto& chunk=work->chunks[node.chunk];
                 if(chunk.sky[node.li]!=node.level||node.level<=1)continue;
@@ -697,9 +809,16 @@ namespace mcmesh::worldstate {
                     const int nli=nlx+nly*g_promise.CS+nlz*g_promise.CS*g_promise.CS;const uint32_t state=neighbor.states[nli];const uint8_t op=state<opacity.size()?opacity[state]:15;
                     const int cost=op>=15?16:(op>1?(int)op:1),next=(int)node.level-cost;if(next<=0||neighbor.sky[nli]>=next)continue;
                     neighbor.sky[nli]=(uint8_t)next;++work->skyWritten;skyQueue.push_back({found->second,nli,(uint8_t)next});}}
+            if(cancelled()){stopCancelled();return;}
             work->skyMS=(Plat_FloatTime()-skyStart)*1000.0;
             work->ms=(Plat_FloatTime()-t0)*1000.0;
-            if(!s_lightCancel.load(std::memory_order_acquire)){std::lock_guard<std::mutex> lock(s_lightMutex);s_lightResult=std::move(work);s_lightReady.store(true,std::memory_order_release);}
+            {
+                std::lock_guard<std::mutex> lock(s_lightMutex);
+                if(!s_lightCancel.load(std::memory_order_acquire)){
+                    s_lightResult=std::move(work);
+                    s_lightReady.store(true,std::memory_order_release);
+                }
+            }
             s_lightRunning.store(false,std::memory_order_release);
         });
         LUA->PushBool(true);return 1;
@@ -734,11 +853,13 @@ namespace mcmesh::worldstate {
             const auto current=g_world.find(source.key);
             if(current==g_world.end()||conflictsWith(source)){++deferredChunks;continue;}
             ChunkMirror* target=current->second.get();
+            const bool wasLightValid = target->lightValid;
             for(int li=0;li<kCellsPerChunk;++li)if(target->blockLight[li]!=source.light[li]||target->skyLight[li]!=source.sky[li])
                 changed.Note(source.key,source.cx,source.cy,source.cz,li);
             memcpy(target->blockLight,source.light.data(),kCellsPerChunk);
             memcpy(target->skyLight,source.sky.data(),kCellsPerChunk);
             target->lightValid=true;++committedChunks;
+            if (!wasLightValid) changed.NoteAtlas(source.key);
         }
         const bool complete=deferredChunks==0;
         if(complete)g_lightFieldReady=true;

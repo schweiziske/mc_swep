@@ -44,17 +44,23 @@ namespace {
             result.chunkKey = job.chunkKey;
             result.section = job.section;
             result.generation = job.generation;
+            result.lightSlot = job.snapshot.lightSlot;
+            result.lightGeneration = job.snapshot.lightGeneration;
+            if (job.profile && job.enqueuedAt > 0.0)
+                result.queueWaitUs = std::max(0.0, (Plat_FloatTime() - job.enqueuedAt) * 1e6);
             const double t0 = Plat_FloatTime();
             try {
                 const double vertexT0 = Plat_FloatTime();
                 result.ok = mcmesh::meshbuild::BuildSectionVerts(job.snapshot, result.build);
                 result.vertexBuildUs = (Plat_FloatTime() - vertexT0) * 1e6;
-                const size_t cpuBytes = (result.build.opaque.vertices + result.build.translucent.vertices)
+                const size_t cpuBytes = (result.build.opaque.vertices + result.build.translucent.vertices
+                    + result.build.lodOpaque.vertices)
                     * sizeof(mcmesh::meshbuild::Vert);
                 if (result.ok && cpuBytes <= mcmesh::meshworker::kMaxSectionResultBytes) {
                     if constexpr (mcmesh::meshworker::kWorkerCreatesMeshes) {
                         const double stageT0 = Plat_FloatTime();
-                        result.meshesReady = mcmesh::meshbuild::StageSectionMeshes(result.build, result.stagedMeshes);
+                        result.meshesReady = mcmesh::meshbuild::StageSectionMeshes(
+                            result.build, result.stagedMeshes, &result.stageStats);
                         result.meshStageUs = (Plat_FloatTime() - stageT0) * 1e6;
                         if (!result.meshesReady) {
                             result.ok = false;
@@ -70,7 +76,7 @@ namespace {
             }
             catch (...) {
                 result.ok = false;
-                mcmesh::meshbuild::DestroyStagedSectionMeshes(result.stagedMeshes);
+                mcmesh::meshbuild::DestroyStagedSectionMeshes(result.stagedMeshes, false);
                 result.build = mcmesh::meshbuild::SectionBuild{};
                 result.build.ok = false;
             }
@@ -98,7 +104,7 @@ namespace {
                     g_resultBytes = result.resultBytes > g_resultBytes ? 0 : g_resultBytes - result.resultBytes;
                     ++g_jobsDropped;
                 }
-                mcmesh::meshbuild::DestroyStagedSectionMeshes(result.stagedMeshes);
+                mcmesh::meshbuild::DestroyStagedSectionMeshes(result.stagedMeshes, false);
             }
             (void)queued;
         }
@@ -193,6 +199,7 @@ namespace mcmesh::meshworker {
             std::lock_guard<std::mutex> lock(g_jobMutex);
             if (!g_running || g_stop) return false;
             if (g_outstanding >= g_maxInFlight) return false;
+            if (job.profile) job.enqueuedAt = Plat_FloatTime();
             g_jobs.push_back(std::move(job));
             ++g_jobsEnqueued;
             ++g_outstanding;

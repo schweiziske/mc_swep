@@ -15,9 +15,6 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="pch.cpp">
-      <Filter>源文件</Filter>
-    </ClCompile>
     <ClCompile Include="dllmain.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
@@ -43,6 +40,12 @@
       <Filter>源文件</Filter>
     </ClCompile>
     <ClCompile Include="meshworker.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="lightatlas.cpp">
+      <Filter>源文件</Filter>
+    </ClCompile>
+    <ClCompile Include="patchdecode.cpp">
       <Filter>源文件</Filter>
     </ClCompile>
   </ItemGroup>
@@ -75,6 +78,12 @@
       <Filter>头文件</Filter>
     </ClInclude>
     <ClInclude Include="meshworker.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="lightatlas.h">
+      <Filter>头文件</Filter>
+    </ClInclude>
+    <ClInclude Include="patchdecode.h">
       <Filter>头文件</Filter>
     </ClInclude>
   </ItemGroup>
